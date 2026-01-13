@@ -65,6 +65,7 @@ class PollingScheduler:
                             "data": data_dict,
                             "timestamp": datetime.now().isoformat(),
                             "csv_written": success,
+                            "inverter_config": inverter_data.get("inverter_config"),
                         }
 
                         results[serial_number] = "success"

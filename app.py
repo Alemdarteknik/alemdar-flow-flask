@@ -111,6 +111,16 @@ def get_inverter_data(serial_number):
         if not scheduler:
             return jsonify({"error": "Scheduler not initialized"}), 503
 
+        # Get inverter config for metadata
+        inverter_config = next(
+            (
+                inv
+                for inv in watchpower_service.inverters
+                if inv["serial_number"] == serial_number
+            ),
+            None,
+        )
+
         # Get cached data
         cached_data = scheduler.get_cached_data(serial_number)
 
@@ -127,6 +137,7 @@ def get_inverter_data(serial_number):
                     "timestamp": latest["data"].get("Data E Hora")
                     or datetime.now().isoformat(),
                     "csv_written": False,
+                    "inverter_config": latest.get("inverter_config"),
                 }
                 cached_data = scheduler.cache[serial_number]
             else:
@@ -151,6 +162,8 @@ def get_inverter_data(serial_number):
                     if scheduler.last_poll_time
                     else None
                 ),
+                "inverter_config": cached_data.get("inverter_config")
+                or inverter_config,
             }
         )
     except Exception as e:

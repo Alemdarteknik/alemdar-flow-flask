@@ -23,14 +23,15 @@ class WatchPowerService:
         Initialize WatchPower service
 
         Args:
-            username: WatchPower account username
-            password: WatchPower account password
+            username: default WatchPower account username
+            password: default WatchPower account password
         """
         self.username = username
         self.password = password
         self.api = WatchPowerAPI()
         self.authenticated = False
         self.inverters: List[Dict[str, Any]] = []
+        self.api_sessions: Dict[tuple[str, str], WatchPowerAPI] = {}
 
     def authenticate(self) -> bool:
         """
@@ -42,12 +43,49 @@ class WatchPowerService:
         try:
             self.api.login(self.username, self.password)
             self.authenticated = True
+            self.api_sessions[(self.username, self.password)] = self.api
             logger.info("Successfully authenticated with WatchPower API")
             return True
         except Exception as e:
             logger.error(f"Authentication failed: {e}")
             self.authenticated = False
             return False
+
+    def _get_api_for_inverter(
+        self, inverter_config: Dict[str, Any]
+    ) -> Optional[WatchPowerAPI]:
+        """Return an authenticated API client for the given inverter credentials."""
+        username = inverter_config.get("username") or self.username
+        password = inverter_config.get("password") or self.password
+
+        if not username or not password:
+            logger.error(
+                f"Missing credentials for inverter {inverter_config.get('serial_number', 'unknown')}"
+            )
+            return None
+
+        creds = (username, password)
+        if creds in self.api_sessions:
+            return self.api_sessions[creds]
+
+        api = WatchPowerAPI()
+        try:
+            api.login(username, password)
+            self.api_sessions[creds] = api
+            logger.info(
+                "Authenticated WatchPower API session for inverter %s with user %s",
+                inverter_config.get("serial_number"),
+                username,
+            )
+            return api
+        except Exception as e:
+            logger.error(
+                "Authentication failed for inverter %s with user %s: %s",
+                inverter_config.get("serial_number"),
+                username,
+                e,
+            )
+            return None
 
     def load_inverters_config(self, config_path: str) -> List[Dict[str, Any]]:
         """
@@ -78,11 +116,6 @@ class WatchPowerService:
         Returns:
             Dictionary containing latest inverter data or None if failed
         """
-        if not self.authenticated:
-            logger.warning("Not authenticated. Attempting to authenticate...")
-            if not self.authenticate():
-                return None
-
         # Find inverter config
         inverter_config = next(
             (inv for inv in self.inverters if inv["serial_number"] == serial_number),
@@ -93,11 +126,15 @@ class WatchPowerService:
             logger.error(f"No configuration found for serial number: {serial_number}")
             return None
 
+        api_client = self._get_api_for_inverter(inverter_config)
+        if not api_client:
+            return None
+
         try:
             # Get today's data
             today = date.today()
             logger.info(f"Fetching daily data for {serial_number} from WatchPower API")
-            raw_data = self.api.get_daily_data(
+            raw_data = api_client.get_daily_data(
                 day=today,
                 serial_number=inverter_config["serial_number"],
                 wifi_pn=inverter_config["wifi_pn"],
@@ -192,11 +229,6 @@ class WatchPowerService:
         Returns:
             Dictionary with titles and rows, or None if failed
         """
-        if not self.authenticated:
-            logger.warning("Not authenticated. Attempting to authenticate...")
-            if not self.authenticate():
-                return None
-
         inverter_config = next(
             (inv for inv in self.inverters if inv["serial_number"] == serial_number),
             None,
@@ -206,10 +238,14 @@ class WatchPowerService:
             logger.error(f"No configuration found for serial number: {serial_number}")
             return None
 
+        api_client = self._get_api_for_inverter(inverter_config)
+        if not api_client:
+            return None
+
         try:
             target_day = day or date.today()
             logger.info(f"Fetching daily raw data for {serial_number} on {target_day}")
-            raw_data = self.api.get_daily_data(
+            raw_data = api_client.get_daily_data(
                 day=target_day,
                 serial_number=inverter_config["serial_number"],
                 wifi_pn=inverter_config["wifi_pn"],
