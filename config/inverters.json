@@ -6,6 +6,118 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-001",
-    "description": "Off-Grid System 001"
+    "description": "Didem's Inverter",
+    "username": "Didem",
+    "password": "didem2026"
+  },
+  {
+    "serial_number": "00202504011400",
+    "wifi_pn": "W0056347770091",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-002",
+    "description": "Baskent's Inverter",
+    "username": "Baskent",
+    "password": "Baskent12345.."
+  },
+  {
+    "serial_number": "00202503003450",
+    "wifi_pn": "W0055172752036",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-003",
+    "description": "Süleyman's Inverter #1",
+    "username": "S%C3%BCleyman1",
+    "password": "suleyman"
+  },
+  {
+    "serial_number": "00202503003370",
+    "wifi_pn": "W0056094717199",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-004",
+    "description": "Süleyman's Inverter #2",
+    "username": "S%C3%BCleyman1",
+    "password": "suleyman"
+  },
+  {
+    "serial_number": "00202503001120",
+    "wifi_pn": "W0055177933523",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-005",
+    "description": "Süleyman's Inverter #3",
+    "username": "S%C3%BCleyman1",
+    "password": "suleyman"
+  },
+  {
+    "serial_number": "00202503003440",
+    "wifi_pn": "W0055190243691",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-006",
+    "description": "Baryo's Inverter #1",
+    "username": "baryo",
+    "password": "Baryo2025"
+  },
+  {
+    "serial_number": "00202503001200",
+    "wifi_pn": "W0055183851410",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-007",
+    "description": "Baryo's Inverter #2",
+    "username": "baryo",
+    "password": "Baryo2025"
+  },
+  {
+    "serial_number": "00202504011260",
+    "wifi_pn": "W0056409813041",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-008",
+    "description": "yildizkabaran's Inverter #1",
+    "username": "yildizkabaran",
+    "password": "(startl3d)"
+  },
+  {
+    "serial_number": "00202504011340",
+    "wifi_pn": "W0056369800009",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-008",
+    "description": "yildizkabaran's Inverter #2",
+    "username": "yildizkabaran",
+    "password": "(startl3d)"
+  },
+  {
+    "serial_number": "00202504011270",
+    "wifi_pn": "W0056371344024",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-009",
+    "description": "Fatma ruso's Inverter",
+    "username": "Fatma+ruso",
+    "password": "196319651"
+  },
+  {
+    "serial_number": "00202504011450",
+    "wifi_pn": "W0056386088854",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-009",
+    "description": "Songül's Inverter",
+    "username": "Song%C3%BCl",
+    "password": "vasit1978"
   }
 ]

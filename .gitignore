@@ -45,3 +45,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Config
+config/
