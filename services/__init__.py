@@ -49,21 +49,10 @@ def init_services():
 
     logger.info("Initializing services...")
 
-    # Get credentials from environment
-    username = os.getenv("WATCHPOWER_USERNAME")
-    password = os.getenv("WATCHPOWER_PASSWORD")
-
-    if not username or not password:
-        logger.error("WatchPower credentials not found in environment variables")
-        raise ValueError("WATCHPOWER_USERNAME and WATCHPOWER_PASSWORD must be set")
-
     # Initialize services
-    watchpower_service = WatchPowerService(username, password)
-    csv_writer = CSVWriter(data_dir="data")
-
-    # Load inverters configuration
     config_path = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
-    watchpower_service.load_inverters_config(config_path)
+    watchpower_service = WatchPowerService(config_path)
+    csv_writer = CSVWriter(data_dir="data")
 
     # Authenticate
     if not watchpower_service.authenticate():

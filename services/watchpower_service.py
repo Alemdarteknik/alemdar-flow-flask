@@ -18,45 +18,77 @@ logger = logging.getLogger(__name__)
 class WatchPowerService:
     """Service class to manage WatchPower API interactions"""
 
-    def __init__(self, username: str, password: str):
+    def __init__(self, config_path: Optional[str] = None):
         """
         Initialize WatchPower service
 
         Args:
-            username: default WatchPower account username
-            password: default WatchPower account password
+            config_path: Path to inverters.json configuration file.
+                        If None, will look for config/inverters.json relative to this file.
         """
-        self.username = username
-        self.password = password
         self.api = WatchPowerAPI()
         self.authenticated = False
         self.inverters: List[Dict[str, Any]] = []
         self.api_sessions: Dict[tuple[str, str], WatchPowerAPI] = {}
 
+        # Load inverter configuration
+        if config_path is None:
+            config_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), "config", "inverters.json"
+            )
+        self.load_inverters_config(config_path)
+
     def authenticate(self) -> bool:
         """
-        Authenticate with WatchPower API
+        Authenticate with WatchPower API for all inverters
+        Creates API sessions for each unique set of credentials
 
         Returns:
-            bool: True if authentication successful
+            bool: True if at least one authentication successful
         """
-        try:
-            self.api.login(self.username, self.password)
-            self.authenticated = True
-            self.api_sessions[(self.username, self.password)] = self.api
-            logger.info("Successfully authenticated with WatchPower API")
-            return True
-        except Exception as e:
-            logger.error(f"Authentication failed: {e}")
-            self.authenticated = False
+        if not self.inverters:
+            logger.error("No inverters loaded. Cannot authenticate.")
             return False
+
+        success_count = 0
+        unique_creds = set()
+
+        # Extract unique credentials from inverters
+        for inv in self.inverters:
+            username = inv.get("username")
+            password = inv.get("password")
+            if username and password:
+                unique_creds.add((username, password))
+
+        # Authenticate each unique credential set
+        for username, password in unique_creds:
+            try:
+                api = WatchPowerAPI()
+                api.login(username, password)
+                self.api_sessions[(username, password)] = api
+                logger.info(
+                    f"Successfully authenticated with WatchPower API for user: {username}"
+                )
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Authentication failed for user {username}: {e}")
+
+        self.authenticated = success_count > 0
+        if self.authenticated:
+            logger.info(
+                f"Authenticated {success_count}/{len(unique_creds)} credential sets"
+            )
+        else:
+            logger.error("Failed to authenticate any credentials")
+
+        return self.authenticated
 
     def _get_api_for_inverter(
         self, inverter_config: Dict[str, Any]
     ) -> Optional[WatchPowerAPI]:
         """Return an authenticated API client for the given inverter credentials."""
-        username = inverter_config.get("username") or self.username
-        password = inverter_config.get("password") or self.password
+        username = inverter_config.get("username")
+        password = inverter_config.get("password")
 
         if not username or not password:
             logger.error(
