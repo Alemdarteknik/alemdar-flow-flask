@@ -3,6 +3,7 @@ Alemdar Flow Flask API
 Backend service for WatchPower API integration
 """
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -31,6 +32,25 @@ CORS(app)  # Enable CORS for Next.js frontend
 watchpower_service = None
 csv_writer = None
 scheduler = None
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
+
+
+def _load_inverters_config():
+    """Load inverter configs from disk"""
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        logger.error(f"Failed to load inverters config: {e}")
+        raise
+
+
+def _write_inverters_config(inverters):
+    """Write inverter configs to disk"""
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(inverters, f, indent=2)
 
 
 def init_services():
@@ -40,8 +60,7 @@ def init_services():
     logger.info("Initializing services...")
 
     # Initialize services
-    config_path = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
-    watchpower_service = WatchPowerService(config_path)
+    watchpower_service = WatchPowerService(CONFIG_PATH)
     csv_writer = CSVWriter(data_dir="data")
 
     # Authenticate
@@ -90,6 +109,135 @@ def get_inverters():
         )
     except Exception as e:
         logger.error(f"Error fetching inverters list: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/inverters/<serial_number>/config", methods=["GET"])
+def get_inverter_config(serial_number):
+    """Get full inverter configuration by serial number"""
+    try:
+        inverters = (
+            watchpower_service.inverters
+            if watchpower_service
+            else _load_inverters_config()
+        )
+
+        inverter = next(
+            (inv for inv in inverters if inv.get("serial_number") == serial_number),
+            None,
+        )
+
+        if not inverter:
+            return (
+                jsonify(
+                    {
+                        "error": "Inverter not found",
+                        "serial_number": serial_number,
+                    }
+                ),
+                404,
+            )
+
+        return jsonify({"success": True, "inverter": inverter})
+    except Exception as e:
+        logger.error(f"Error fetching inverter config: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/inverters", methods=["POST"])
+def upsert_inverter():
+    """Create or override inverter configuration"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        override = bool(payload.get("override", False))
+
+        required_fields = [
+            "serial_number",
+            "wifi_pn",
+            "device_code",
+            "device_address",
+            "system_type",
+            "username",
+            "password",
+        ]
+
+        missing = [
+            field for field in required_fields if payload.get(field) in (None, "")
+        ]
+
+        if missing:
+            return (
+                jsonify({"error": "Missing required fields", "fields": missing}),
+                400,
+            )
+
+        try:
+            device_code = int(payload.get("device_code"))
+            device_address = int(payload.get("device_address"))
+        except (TypeError, ValueError):
+            return (
+                jsonify(
+                    {
+                        "error": "Invalid device_code or device_address",
+                    }
+                ),
+                400,
+            )
+
+        inverter = {
+            "serial_number": str(payload.get("serial_number")).strip(),
+            "wifi_pn": str(payload.get("wifi_pn")).strip(),
+            "device_code": device_code,
+            "device_address": device_address,
+            "system_type": str(payload.get("system_type")).strip(),
+            "alias": str(payload.get("alias") or "").strip(),
+            "description": str(payload.get("description") or "").strip(),
+            "username": str(payload.get("username")).strip(),
+            "password": str(payload.get("password")).strip(),
+        }
+
+        inverters = _load_inverters_config()
+        existing_index = next(
+            (
+                index
+                for index, inv in enumerate(inverters)
+                if inv.get("serial_number") == inverter["serial_number"]
+            ),
+            None,
+        )
+
+        if existing_index is not None and not override:
+            return (
+                jsonify(
+                    {
+                        "error": "Inverter with this serial already exists",
+                        "serial_number": inverter["serial_number"],
+                        "inverter": inverters[existing_index],
+                    }
+                ),
+                409,
+            )
+
+        if existing_index is not None:
+            inverters[existing_index] = inverter
+        else:
+            inverters.append(inverter)
+
+        _write_inverters_config(inverters)
+
+        if watchpower_service:
+            watchpower_service.load_inverters_config(CONFIG_PATH)
+            watchpower_service.authenticate()
+
+        return jsonify(
+            {
+                "success": True,
+                "inverter": inverter,
+                "overridden": existing_index is not None,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error saving inverter: {e}")
         return jsonify({"error": str(e)}), 500
 
 

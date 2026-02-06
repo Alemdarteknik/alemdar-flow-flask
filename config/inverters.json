@@ -130,5 +130,16 @@
     "description": "Songül's Inverter",
     "username": "Song%C3%BCl",
     "password": "vasit1978"
+  },
+  {
+    "serial_number": "00202211004500",
+    "wifi_pn": "W0027242443596",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-013",
+    "description": "Gonul's Inverter",
+    "username": "gonul2026",
+    "password": "gonul2026"
   }
 ]

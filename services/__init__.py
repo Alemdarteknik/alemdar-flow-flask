@@ -64,7 +64,7 @@ def init_services():
     scheduler = PollingScheduler(
         watchpower_service=watchpower_service,
         csv_writer=csv_writer,
-        poll_interval_minutes=poll_interval_minutes,
+        poll_interval_minutes=poll_interval,
     )
 
     scheduler.start()
