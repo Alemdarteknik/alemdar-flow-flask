@@ -44,6 +44,7 @@ scheduler = None
 
 
 def init_services():
+    
     """Initialize all services"""
     global watchpower_service, csv_writer, scheduler
 
