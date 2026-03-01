@@ -64,6 +64,7 @@ class WatchPowerService:
         for username, password in unique_creds:
             try:
                 api = WatchPowerAPI()
+                print(f"Attempting to authenticate with WatchPower API for user: {username} and {password}")
                 api.login(username, password)
                 self.api_sessions[(username, password)] = api
                 logger.info(
