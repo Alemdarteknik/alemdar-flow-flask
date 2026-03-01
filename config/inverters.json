@@ -149,8 +149,8 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-014",
-    "description": "Cimbom's Inverter",
-    "username": "Cimbom1661",
+    "description": "Kadirguler's Inverter",
+    "username": "kadirguler",
     "password": "Cimbom1661"
   },
   {
@@ -161,7 +161,7 @@
     "system_type": "offgrid",
     "alias": "OG-015",
     "description": "Omer's Inverter",
-    "username": "omer123kocaman",
+    "username": "omer kocaman",
     "password": "omer123kocaman"
   }
 ]
