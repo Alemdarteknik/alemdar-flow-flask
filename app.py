@@ -11,6 +11,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from services.neon_store import NeonStore
 from services.scheduler import PollingScheduler
 from services.watchpower_service import WatchPowerService
 from utils.csv_writer import CSVWriter
@@ -32,6 +33,7 @@ CORS(app)  # Enable CORS for Next.js frontend
 watchpower_service = None
 csv_writer = None
 scheduler = None
+neon_store = None
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
 
 
@@ -55,13 +57,17 @@ def _write_inverters_config(inverters):
 
 def init_services():
     """Initialize all services"""
-    global watchpower_service, csv_writer, scheduler
+    global watchpower_service, csv_writer, scheduler, neon_store
 
     logger.info("Initializing services...")
 
     # Initialize services
     watchpower_service = WatchPowerService(CONFIG_PATH)
     csv_writer = CSVWriter(data_dir="data")
+    neon_store = NeonStore(
+        database_url=os.getenv("NEON_DATABASE_URL"),
+        timezone_name=os.getenv("WATCHPOWER_TIMEZONE", "Europe/Istanbul"),
+    )
 
     # Authenticate
     if not watchpower_service.authenticate():
@@ -70,11 +76,32 @@ def init_services():
 
     # Create and start scheduler
     poll_interval = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
+    poll_retry_attempts = int(os.getenv("POLL_RETRY_ATTEMPTS", 3))
+    poll_retry_backoff_seconds = int(os.getenv("POLL_RETRY_BACKOFF_SECONDS", 2))
     scheduler = PollingScheduler(
         watchpower_service=watchpower_service,
         csv_writer=csv_writer,
+        neon_store=neon_store,
         poll_interval_minutes=poll_interval,
+        poll_retry_attempts=poll_retry_attempts,
+        poll_retry_backoff_seconds=poll_retry_backoff_seconds,
     )
+
+    if neon_store.enabled:
+        try:
+            neon_store.ensure_poll_audit_table()
+        except Exception as e:
+            logger.error("Failed to ensure poll audit table in Neon: %s", e)
+
+        for inverter in watchpower_service.inverters:
+            try:
+                neon_store.upsert_inverter(inverter)
+            except Exception as e:
+                logger.error(
+                    "Failed to upsert inverter %s in Neon: %s",
+                    inverter.get("serial_number"),
+                    e,
+                )
 
     scheduler.start()
 
@@ -312,11 +339,30 @@ def get_inverter_data(serial_number):
 def get_inverter_history(serial_number):
     """Get historical data for a specific inverter from CSV"""
     try:
-        if not csv_writer:
-            return jsonify({"error": "CSV writer not initialized"}), 503
-
         # Get optional query parameters
         limit = request.args.get("limit", type=int)
+
+        if neon_store and neon_store.enabled:
+            try:
+                data = neon_store.fetch_history(serial_number=serial_number, limit=limit)
+                if data:
+                    return jsonify(
+                        {
+                            "success": True,
+                            "serial_number": serial_number,
+                            "count": len(data),
+                            "data": data,
+                        }
+                    )
+            except Exception as e:
+                logger.error(
+                    "Failed to read history from Neon for %s: %s. Falling back to CSV.",
+                    serial_number,
+                    e,
+                )
+
+        if not csv_writer:
+            return jsonify({"error": "CSV writer not initialized"}), 503
 
         if limit:
             data = csv_writer.read_latest(serial_number, num_rows=limit)

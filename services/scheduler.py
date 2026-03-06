@@ -15,7 +15,15 @@ logger = logging.getLogger(__name__)
 class PollingScheduler:
     """Scheduler for periodic data polling"""
 
-    def __init__(self, watchpower_service, csv_writer, poll_interval_minutes: int = 5):
+    def __init__(
+        self,
+        watchpower_service,
+        csv_writer,
+        neon_store=None,
+        poll_interval_minutes: int = 5,
+        poll_retry_attempts: int = 3,
+        poll_retry_backoff_seconds: int = 2,
+    ):
         """
         Initialize polling scheduler
 
@@ -26,8 +34,11 @@ class PollingScheduler:
         """
         self.watchpower_service = watchpower_service
         self.csv_writer = csv_writer
+        self.neon_store = neon_store
         self.poll_interval_minutes = poll_interval_minutes
         self.poll_interval_seconds = poll_interval_minutes * 60
+        self.poll_retry_attempts = max(1, int(poll_retry_attempts))
+        self.poll_retry_backoff_seconds = max(0, int(poll_retry_backoff_seconds))
 
         self.is_running = False
         self.thread: Optional[threading.Thread] = None
@@ -35,6 +46,48 @@ class PollingScheduler:
         # In-memory cache for latest data
         self.cache: Dict[str, Any] = {}
         self.last_poll_time: Optional[datetime] = None
+
+    def _fetch_with_retries(self, serial_number: str) -> Dict[str, Any]:
+        """
+        Fetch inverter data with bounded retries.
+
+        Returns:
+            {
+                "status": "success" | "no_data",
+                "attempts": int,
+                "data": Optional[Dict[str, Any]],
+                "error": Optional[str],
+            }
+        """
+        attempts = 0
+        for attempt in range(1, self.poll_retry_attempts + 1):
+            attempts = attempt
+            data = self.watchpower_service.get_latest_data(serial_number)
+            if data and "data" in data:
+                return {
+                    "status": "success",
+                    "attempts": attempts,
+                    "data": data,
+                    "error": None,
+                }
+
+            if attempt < self.poll_retry_attempts and self.poll_retry_backoff_seconds > 0:
+                sleep_for = self.poll_retry_backoff_seconds * attempt
+                logger.warning(
+                    "No data for %s on attempt %s/%s. Retrying in %ss.",
+                    serial_number,
+                    attempt,
+                    self.poll_retry_attempts,
+                    sleep_for,
+                )
+                time.sleep(sleep_for)
+
+        return {
+            "status": "no_data",
+            "attempts": attempts,
+            "data": None,
+            "error": f"No data after {attempts} attempt(s)",
+        }
 
     def poll_once(self) -> Dict[str, Any]:
         """
@@ -47,12 +100,14 @@ class PollingScheduler:
         results = {}
 
         try:
-            # Get data for all inverters
-            all_data = self.watchpower_service.get_all_inverters_data()
-
-            for serial_number, inverter_data in all_data.items():
+            for inverter in self.watchpower_service.inverters:
+                serial_number = str(inverter.get("serial_number") or "unknown")
+                alias = inverter.get("alias")
                 try:
-                    if inverter_data and "data" in inverter_data:
+                    fetch_result = self._fetch_with_retries(serial_number)
+                    inverter_data = fetch_result.get("data")
+
+                    if fetch_result["status"] == "success" and inverter_data:
                         data_dict = inverter_data["data"]
 
                         # Write to CSV with deduplication
@@ -68,11 +123,54 @@ class PollingScheduler:
                             "inverter_config": inverter_data.get("inverter_config"),
                         }
 
+                        if self.neon_store and self.neon_store.enabled:
+                            try:
+                                inverter_config = inverter_data.get("inverter_config") or {}
+                                self.neon_store.upsert_inverter(inverter_config)
+                                self.neon_store.persist_reading(
+                                    serial_number=serial_number,
+                                    raw_data=data_dict,
+                                    source="poll",
+                                )
+                                self.neon_store.record_poll_outcome(
+                                    serial_number=serial_number,
+                                    alias=alias,
+                                    status="success",
+                                    attempts=fetch_result["attempts"],
+                                    error_text=None,
+                                )
+                            except Exception as neon_error:
+                                logger.error(
+                                    "Failed to persist poll data to Neon for %s: %s",
+                                    serial_number,
+                                    neon_error,
+                                )
+
                         results[serial_number] = "success"
                         logger.info(f"Polled {serial_number} successfully")
                     else:
+                        if self.neon_store and self.neon_store.enabled:
+                            try:
+                                self.neon_store.record_poll_outcome(
+                                    serial_number=serial_number,
+                                    alias=alias,
+                                    status="no_data",
+                                    attempts=fetch_result["attempts"],
+                                    error_text=fetch_result["error"],
+                                )
+                            except Exception as neon_error:
+                                logger.error(
+                                    "Failed to persist poll audit to Neon for %s: %s",
+                                    serial_number,
+                                    neon_error,
+                                )
+
                         results[serial_number] = "no_data"
-                        logger.warning(f"No data received for {serial_number}")
+                        logger.warning(
+                            "No data received for %s after %s attempt(s)",
+                            serial_number,
+                            fetch_result["attempts"],
+                        )
 
                 except Exception as e:
                     results[serial_number] = f"error: {str(e)}"
