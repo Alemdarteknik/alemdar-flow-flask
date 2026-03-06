@@ -9,6 +9,7 @@ import os
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+from requests.exceptions import Timeout as RequestsTimeout
 from watchpower_api import WatchPowerAPI
 from watchpower_api.models import DeviceIdentifier
 
@@ -30,6 +31,12 @@ class WatchPowerService:
         self.authenticated = False
         self.inverters: List[Dict[str, Any]] = []
         self.api_sessions: Dict[tuple[str, str], WatchPowerAPI] = {}
+        self.daily_retry_attempts = max(
+            1, int(os.getenv("WATCHPOWER_DAILY_RETRY_ATTEMPTS", 2))
+        )
+        self.daily_retry_backoff_seconds = max(
+            0, int(os.getenv("WATCHPOWER_DAILY_RETRY_BACKOFF_SECONDS", 2))
+        )
 
         # Load inverter configuration
         if config_path is None:
@@ -64,7 +71,10 @@ class WatchPowerService:
         for username, password in unique_creds:
             try:
                 api = WatchPowerAPI()
-                print(f"Attempting to authenticate with WatchPower API for user: {username} and {password}")
+                logger.info(
+                    "Attempting to authenticate with WatchPower API for user: %s",
+                    username,
+                )
                 api.login(username, password)
                 self.api_sessions[(username, password)] = api
                 logger.info(
@@ -139,6 +149,65 @@ class WatchPowerService:
             logger.error(f"Failed to load inverters config: {e}")
             return []
 
+    def _is_timeout_error(self, err: Exception) -> bool:
+        if isinstance(err, RequestsTimeout):
+            return True
+        message = str(err).lower()
+        return "read timed out" in message or "timed out" in message
+
+    def _fetch_daily_data_with_retries(
+        self,
+        api_client: WatchPowerAPI,
+        inverter_config: Dict[str, Any],
+        target_day: date,
+        serial_number: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch WatchPower daily data with bounded retries."""
+        attempts = self.daily_retry_attempts
+        for attempt in range(1, attempts + 1):
+            try:
+                return api_client.get_daily_data(
+                    day=target_day,
+                    serial_number=inverter_config["serial_number"],
+                    wifi_pn=inverter_config["wifi_pn"],
+                    dev_code=inverter_config["device_code"],
+                    dev_addr=inverter_config["device_address"],
+                )
+            except Exception as e:
+                timeout_error = self._is_timeout_error(e)
+                if timeout_error:
+                    logger.warning(
+                        "WatchPower timeout for %s (attempt %s/%s): %s",
+                        serial_number,
+                        attempt,
+                        attempts,
+                        e,
+                    )
+                else:
+                    logger.error(
+                        "WatchPower error for %s (attempt %s/%s): %s",
+                        serial_number,
+                        attempt,
+                        attempts,
+                        e,
+                    )
+
+                if attempt >= attempts:
+                    return None
+
+                if self.daily_retry_backoff_seconds > 0:
+                    backoff = self.daily_retry_backoff_seconds * attempt
+                    logger.warning(
+                        "Retrying WatchPower fetch for %s in %ss",
+                        serial_number,
+                        backoff,
+                    )
+                    import time
+
+                    time.sleep(backoff)
+
+        return None
+
     def get_latest_data(self, serial_number: str) -> Optional[Dict[str, Any]]:
         """
         Get latest data for a specific inverter
@@ -167,12 +236,11 @@ class WatchPowerService:
             # Get today's data
             today = date.today()
             logger.info(f"Fetching daily data for {serial_number} from WatchPower API")
-            raw_data = api_client.get_daily_data(
-                day=today,
-                serial_number=inverter_config["serial_number"],
-                wifi_pn=inverter_config["wifi_pn"],
-                dev_code=inverter_config["device_code"],
-                dev_addr=inverter_config["device_address"],
+            raw_data = self._fetch_daily_data_with_retries(
+                api_client=api_client,
+                inverter_config=inverter_config,
+                target_day=today,
+                serial_number=serial_number,
             )
             logger.info(
                 f"WatchPower API response for {serial_number}: {raw_data is not None}"
@@ -225,9 +293,7 @@ class WatchPowerService:
             return None
 
         except Exception as e:
-            logger.error(
-                f"Failed to fetch data for {serial_number}: {e}", exc_info=True
-            )
+            logger.error(f"Failed to fetch data for {serial_number}: {e}")
             return None
 
     def get_all_inverters_data(self) -> Dict[str, Any]:
@@ -278,12 +344,11 @@ class WatchPowerService:
         try:
             target_day = day or date.today()
             logger.info(f"Fetching daily raw data for {serial_number} on {target_day}")
-            raw_data = api_client.get_daily_data(
-                day=target_day,
-                serial_number=inverter_config["serial_number"],
-                wifi_pn=inverter_config["wifi_pn"],
-                dev_code=inverter_config["device_code"],
-                dev_addr=inverter_config["device_address"],
+            raw_data = self._fetch_daily_data_with_retries(
+                api_client=api_client,
+                inverter_config=inverter_config,
+                target_day=target_day,
+                serial_number=serial_number,
             )
             logger.info(
                 f"WatchPower API daily response for {serial_number}: {raw_data is not None}"
@@ -327,9 +392,7 @@ class WatchPowerService:
             return None
 
         except Exception as e:
-            logger.error(
-                f"Failed to fetch daily data for {serial_number}: {e}", exc_info=True
-            )
+            logger.error(f"Failed to fetch daily data for {serial_number}: {e}")
             return None
 
     def get_inverters_list(self) -> List[Dict[str, Any]]:
