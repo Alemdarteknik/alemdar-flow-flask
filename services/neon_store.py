@@ -287,9 +287,9 @@ class NeonStore:
                 if limit and limit > 0:
                     cur.execute(
                         """
-                        SELECT raw_payload
+                        SELECT raw_payload, reading_at, polled_at
                         FROM (
-                            SELECT raw_payload, reading_at
+                            SELECT raw_payload, reading_at, polled_at
                             FROM public.inverter_readings
                             WHERE serial_number = %s
                             ORDER BY reading_at DESC
@@ -302,7 +302,7 @@ class NeonStore:
                 else:
                     cur.execute(
                         """
-                        SELECT raw_payload
+                        SELECT raw_payload, reading_at, polled_at
                         FROM public.inverter_readings
                         WHERE serial_number = %s
                         ORDER BY reading_at ASC
@@ -315,11 +315,26 @@ class NeonStore:
         history: List[Dict[str, Any]] = []
         for row in rows:
             payload = row.get("raw_payload")
+            reading_at = row.get("reading_at")
+            polled_at = row.get("polled_at")
             if isinstance(payload, dict):
-                history.append(payload)
+                normalized = dict(payload)
+                if isinstance(reading_at, datetime):
+                    normalized["reading_at"] = reading_at.isoformat()
+                    normalized.setdefault("timestamp", reading_at.isoformat())
+                if isinstance(polled_at, datetime):
+                    normalized["polled_at"] = polled_at.isoformat()
+                history.append(normalized)
             elif isinstance(payload, str):
                 try:
-                    history.append(json.loads(payload))
+                    parsed = json.loads(payload)
+                    if isinstance(parsed, dict):
+                        if isinstance(reading_at, datetime):
+                            parsed["reading_at"] = reading_at.isoformat()
+                            parsed.setdefault("timestamp", reading_at.isoformat())
+                        if isinstance(polled_at, datetime):
+                            parsed["polled_at"] = polled_at.isoformat()
+                        history.append(parsed)
                 except json.JSONDecodeError:
                     continue
         return history
