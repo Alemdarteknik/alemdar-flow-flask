@@ -16,7 +16,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-002",
+    "alias": "OG-001",
     "description": "Didem's Inverter #2",
     "username": "Didem",
     "password": "didem2026"
@@ -27,7 +27,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-003",
+    "alias": "OG-002",
     "description": "Baskent's Inverter",
     "username": "Baskent",
     "password": "Baskent12345.."
@@ -38,7 +38,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-004",
+    "alias": "OG-003",
     "description": "Süleyman's Inverter #1",
     "username": "S%C3%BCleyman1",
     "password": "suleyman"
@@ -49,7 +49,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-005",
+    "alias": "OG-003",
     "description": "Süleyman's Inverter #2",
     "username": "S%C3%BCleyman1",
     "password": "suleyman"
@@ -60,7 +60,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-006",
+    "alias": "OG-003",
     "description": "Süleyman's Inverter #3",
     "username": "S%C3%BCleyman1",
     "password": "suleyman"
@@ -71,7 +71,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-007",
+    "alias": "OG-004",
     "description": "Baryo's Inverter #1",
     "username": "baryo",
     "password": "Baryo2025"
@@ -82,7 +82,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-008",
+    "alias": "OG-004",
     "description": "Baryo's Inverter #2",
     "username": "baryo",
     "password": "Baryo2025"
@@ -93,7 +93,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-009",
+    "alias": "OG-005",
     "description": "yildizkabaran's Inverter #1",
     "username": "yildizkabaran",
     "password": "(startl3d)"
@@ -104,7 +104,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-010",
+    "alias": "OG-005",
     "description": "yildizkabaran's Inverter #2",
     "username": "yildizkabaran",
     "password": "(startl3d)"
@@ -115,7 +115,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-011",
+    "alias": "OG-006",
     "description": "Fatma ruso's Inverter",
     "username": "Fatma+ruso",
     "password": "196319651"
@@ -126,7 +126,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-012",
+    "alias": "OG-007",
     "description": "Songül's Inverter",
     "username": "Song%C3%BCl",
     "password": "vasit1978"
@@ -137,7 +137,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-013",
+    "alias": "OG-008",
     "description": "Gonul's Inverter",
     "username": "gonul2026",
     "password": "gonul2026"
@@ -148,7 +148,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-014",
+    "alias": "OG-009",
     "description": "Kadirguler's Inverter",
     "username": "kadirguler",
     "password": "Cimbom1661"
@@ -159,7 +159,7 @@
     "device_code": 2449,
     "device_address": 1,
     "system_type": "offgrid",
-    "alias": "OG-015",
+    "alias": "OG-010",
     "description": "Omer's Inverter",
     "username": "omer%20kocaman",
     "password": "omer123kocaman"

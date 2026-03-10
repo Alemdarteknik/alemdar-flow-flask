@@ -321,7 +321,8 @@ class NeonStore:
                 normalized = dict(payload)
                 if isinstance(reading_at, datetime):
                     normalized["reading_at"] = reading_at.isoformat()
-                    normalized.setdefault("timestamp", reading_at.isoformat())
+                    normalized["timestamp"] = reading_at.isoformat()
+                    normalized["time"] = reading_at.isoformat()
                 if isinstance(polled_at, datetime):
                     normalized["polled_at"] = polled_at.isoformat()
                 history.append(normalized)
@@ -331,7 +332,8 @@ class NeonStore:
                     if isinstance(parsed, dict):
                         if isinstance(reading_at, datetime):
                             parsed["reading_at"] = reading_at.isoformat()
-                            parsed.setdefault("timestamp", reading_at.isoformat())
+                            parsed["timestamp"] = reading_at.isoformat()
+                            parsed["time"] = reading_at.isoformat()
                         if isinstance(polled_at, datetime):
                             parsed["polled_at"] = polled_at.isoformat()
                         history.append(parsed)

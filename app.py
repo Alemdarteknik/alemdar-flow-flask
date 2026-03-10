@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Next.js frontend
+CORS(app) 
 
 # Global service instances
 watchpower_service = None
