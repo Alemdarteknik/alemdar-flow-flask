@@ -6,7 +6,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-001",
-    "description": "Didem's Inverter #1",
+    "description": "Didem",
     "username": "Didem",
     "password": "didem2026"
   },
@@ -17,7 +17,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-001",
-    "description": "Didem's Inverter #2",
+    "description": "Didem",
     "username": "Didem",
     "password": "didem2026"
   },
@@ -28,7 +28,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-002",
-    "description": "Baskent's Inverter",
+    "description": "Baskent",
     "username": "Baskent",
     "password": "Baskent12345.."
   },
@@ -39,7 +39,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-003",
-    "description": "Süleyman's Inverter #1",
+    "description": "Süleyman ",
     "username": "S%C3%BCleyman1",
     "password": "suleyman"
   },
@@ -50,7 +50,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-003",
-    "description": "Süleyman's Inverter #2",
+    "description": "Süleyman",
     "username": "S%C3%BCleyman1",
     "password": "suleyman"
   },
@@ -61,7 +61,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-003",
-    "description": "Süleyman's Inverter #3",
+    "description": "Süleyman",
     "username": "S%C3%BCleyman1",
     "password": "suleyman"
   },
@@ -72,7 +72,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-004",
-    "description": "Baryo's Inverter #1",
+    "description": "Baryo",
     "username": "baryo",
     "password": "Baryo2025"
   },
@@ -83,7 +83,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-004",
-    "description": "Baryo's Inverter #2",
+    "description": "Baryo",
     "username": "baryo",
     "password": "Baryo2025"
   },
@@ -94,7 +94,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-005",
-    "description": "yildizkabaran's Inverter #1",
+    "description": "yildizkabaran",
     "username": "yildizkabaran",
     "password": "(startl3d)"
   },
@@ -105,7 +105,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-005",
-    "description": "yildizkabaran's Inverter #2",
+    "description": "yildizkabaran",
     "username": "yildizkabaran",
     "password": "(startl3d)"
   },
@@ -116,7 +116,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-006",
-    "description": "Fatma ruso's Inverter",
+    "description": "Fatma ruso",
     "username": "Fatma+ruso",
     "password": "196319651"
   },
@@ -127,7 +127,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-007",
-    "description": "Songül's Inverter",
+    "description": "Songül",
     "username": "Song%C3%BCl",
     "password": "vasit1978"
   },
@@ -138,7 +138,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-008",
-    "description": "Gonul's Inverter",
+    "description": "Gonul",
     "username": "gonul2026",
     "password": "gonul2026"
   },
@@ -149,7 +149,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-009",
-    "description": "Kadirguler's Inverter",
+    "description": "Kadirguler",
     "username": "kadirguler",
     "password": "Cimbom1661"
   },
@@ -160,7 +160,7 @@
     "device_address": 1,
     "system_type": "offgrid",
     "alias": "OG-010",
-    "description": "Omer's Inverter",
+    "description": "Omer",
     "username": "omer%20kocaman",
     "password": "omer123kocaman"
   }
