@@ -6,7 +6,8 @@ Backend service for WatchPower API integration
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -25,6 +26,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _read_positive_int_env(name, default):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        logger.warning("Invalid %s=%r. Falling back to %s.", name, raw_value, default)
+        return default
+
+
+WATCHPOWER_TIMEZONE = os.getenv("WATCHPOWER_TIMEZONE", "Europe/Nicosia")
+WATCHPOWER_ZONE = ZoneInfo(WATCHPOWER_TIMEZONE)
+INVERTER_STALE_THRESHOLD_MINUTES = _read_positive_int_env(
+    "INVERTER_STALE_THRESHOLD_MINUTES", 8
+)
+
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app) 
@@ -35,6 +55,92 @@ csv_writer = None
 scheduler = None
 neon_store = None
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
+
+
+def _parse_watchpower_timestamp(raw_timestamp):
+    if not isinstance(raw_timestamp, str):
+        return None
+
+    text = raw_timestamp.strip()
+    if not text:
+        return None
+
+    try:
+        return (
+            datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=WATCHPOWER_ZONE)
+            .astimezone(timezone.utc)
+        )
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=WATCHPOWER_ZONE)
+        return parsed.astimezone(timezone.utc)
+
+
+def _build_telemetry_health(raw_data):
+    telemetry_timestamp = raw_data.get("Data E Hora") if isinstance(raw_data, dict) else None
+    parsed_timestamp = _parse_watchpower_timestamp(telemetry_timestamp)
+
+    base_payload = {
+        "threshold_minutes": INVERTER_STALE_THRESHOLD_MINUTES,
+        "timezone": WATCHPOWER_TIMEZONE,
+        "telemetry_timestamp": (
+            parsed_timestamp.isoformat() if parsed_timestamp is not None else None
+        ),
+    }
+
+    if parsed_timestamp is None:
+        return {
+            **base_payload,
+            "state": "offline",
+            "reason": (
+                "This inverter is not connected to the internet. "
+                "No valid recent inverter data is available."
+            ),
+            "stale_minutes": None,
+        }
+
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(WATCHPOWER_ZONE)
+    print(f"Current UTC time:   {now_utc.isoformat()}")
+    print(f"Current local time: {now_local.isoformat()}")
+    print(f"Telemetry UTC time: {parsed_timestamp.isoformat()}")
+    print(
+        f"Telemetry local time: "
+        f"{parsed_timestamp.astimezone(WATCHPOWER_ZONE).isoformat()}"
+    )
+
+    delta_seconds = int((now_utc - parsed_timestamp).total_seconds())
+    print(f"Delta minutes: {delta_seconds / 60}")
+
+  
+    elapsed_seconds = max(0, int((now_local - parsed_timestamp).total_seconds()))
+    print(f"This is the elapsed mins: {elapsed_seconds / 60}")
+    stale_minutes = elapsed_seconds // 60
+
+    if elapsed_seconds >= INVERTER_STALE_THRESHOLD_MINUTES * 60:
+        print("the inverter is offline")
+        return {
+            **base_payload,
+            "state": "offline",
+            "reason": (
+                "This inverter is not connected to the internet. "
+                f"No new data has been received for {stale_minutes} minutes."
+            ),
+            "stale_minutes": stale_minutes,
+        }
+    print("the inverter is online")
+    return {
+        **base_payload,
+        "state": "online",
+        "reason": "Telemetry is current.",
+        "stale_minutes": stale_minutes,
+    }
 
 
 def _load_inverters_config():
@@ -66,7 +172,7 @@ def init_services():
     csv_writer = CSVWriter(data_dir="data")
     neon_store = NeonStore(
         database_url=os.getenv("NEON_DATABASE_URL"),
-        timezone_name=os.getenv("WATCHPOWER_TIMEZONE", "Europe/Istanbul"),
+        timezone_name=WATCHPOWER_TIMEZONE,
     )
 
     # Authenticate
@@ -320,6 +426,7 @@ def get_inverter_data(serial_number):
                 "success": True,
                 "serial_number": serial_number,
                 "data": cached_data["data"],
+                "telemetry_health": _build_telemetry_health(cached_data["data"]),
                 "cached_at": cached_data["timestamp"],
                 "last_poll": (
                     scheduler.last_poll_time.isoformat()

@@ -35,6 +35,7 @@ WATCHPOWER_USERNAME=your_username
 WATCHPOWER_PASSWORD=your_password
 FLASK_PORT=5000
 POLL_INTERVAL_MINUTES=5
+INVERTER_STALE_THRESHOLD_MINUTES=8
 ```
 
 ### 3. Configure Inverters
@@ -88,6 +89,8 @@ GET /api/inverter/<serial_number>
 ```
 
 Returns latest cached data for specific inverter.
+Response also includes `telemetry_health`, which marks the inverter offline when no
+new inverter data has been received within `INVERTER_STALE_THRESHOLD_MINUTES`.
 
 ### Get Inverter History
 
