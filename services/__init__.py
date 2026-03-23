@@ -34,6 +34,7 @@ WATCHPOWER_USERNAME = os.getenv("WATCHPOWER_USERNAME")
 WATCHPOWER_PASSWORD = os.getenv("WATCHPOWER_PASSWORD")
 FLASK_PORT = int(os.getenv("FLASK_PORT", 5000))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
+WATCHPOWER_TIMEZONE = os.getenv("WATCHPOWER_TIMEZONE", "Europe/Nicosia")
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -52,7 +53,9 @@ def init_services():
 
     # Initialize services
     config_path = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
-    watchpower_service = WatchPowerService(config_path)
+    watchpower_service = WatchPowerService(
+        config_path, timezone_name=WATCHPOWER_TIMEZONE
+    )
     csv_writer = CSVWriter(data_dir="data")
 
     # Authenticate
@@ -66,6 +69,11 @@ def init_services():
         watchpower_service=watchpower_service,
         csv_writer=csv_writer,
         poll_interval_minutes=poll_interval,
+        tick_seconds=int(os.getenv("POLL_TICK_SECONDS", 15)),
+        timezone_name=WATCHPOWER_TIMEZONE,
+        live_status_refresh_seconds=int(
+            os.getenv("LIVE_STATUS_REFRESH_SECONDS", 60)
+        ),
     )
 
     scheduler.start()

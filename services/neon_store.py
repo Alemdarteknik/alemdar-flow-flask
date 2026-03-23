@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 
+from utils.telemetry_time import parse_watchpower_timestamp
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,20 +48,12 @@ class NeonStore:
         return psycopg.connect(self.database_url, row_factory=dict_row)
 
     def _parse_reading_at(self, raw_data: Dict[str, Any]) -> datetime:
+        parsed = parse_watchpower_timestamp(raw_data.get("Data E Hora"), self._tz)
+        if parsed is not None:
+            return parsed
         raw_timestamp = raw_data.get("Data E Hora")
         if isinstance(raw_timestamp, str) and raw_timestamp.strip():
-            text = raw_timestamp.strip()
-            try:
-                parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-                return parsed.replace(tzinfo=self._tz).astimezone(timezone.utc)
-            except ValueError:
-                try:
-                    parsed = datetime.fromisoformat(text)
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=self._tz)
-                    return parsed.astimezone(timezone.utc)
-                except ValueError:
-                    logger.warning("Failed to parse timestamp '%s', using now()", text)
+            logger.warning("Failed to parse timestamp '%s', using now()", raw_timestamp)
         return datetime.now(timezone.utc)
 
     def _source_hash(self, serial_number: str, reading_at: datetime, raw_data: Dict[str, Any]) -> str:
@@ -340,3 +334,54 @@ class NeonStore:
                 except json.JSONDecodeError:
                     continue
         return history
+
+    def _normalize_reading_row(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        payload = row.get("raw_payload")
+        reading_at = row.get("reading_at")
+        polled_at = row.get("polled_at")
+
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        normalized = dict(payload)
+        if isinstance(reading_at, datetime):
+            normalized["reading_at"] = reading_at.isoformat()
+            normalized["timestamp"] = reading_at.isoformat()
+            normalized["time"] = reading_at.isoformat()
+        if isinstance(polled_at, datetime):
+            normalized["polled_at"] = polled_at.isoformat()
+
+        return {
+            "data": normalized,
+            "reading_at": reading_at,
+            "polled_at": polled_at,
+        }
+
+    def fetch_latest_reading(self, serial_number: str) -> Optional[Dict[str, Any]]:
+        if not self.enabled:
+            return None
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT raw_payload, reading_at, polled_at
+                    FROM public.inverter_readings
+                    WHERE serial_number = %s
+                    ORDER BY reading_at DESC
+                    LIMIT 1
+                    """,
+                    (serial_number,),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return self._normalize_reading_row(row)

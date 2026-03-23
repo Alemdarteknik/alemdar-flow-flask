@@ -6,8 +6,9 @@ Handles writing inverter data to CSV files
 import csv
 import logging
 import os
-from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from utils.telemetry_time import parse_watchpower_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +190,37 @@ class CSVWriter:
         except Exception as e:
             logger.error(f"Failed to read CSV for {serial_number}: {e}")
             return []
+
+    def read_freshest(
+        self,
+        serial_number: str,
+        timestamp_field: str = "Data E Hora",
+        timezone_name: str = "Europe/Nicosia",
+    ) -> Optional[Dict[str, Any]]:
+        rows = self.get_all_data(serial_number)
+        if not rows:
+            return None
+
+        fallback_row = rows[-1]
+        latest_row = None
+        latest_timestamp = None
+
+        for row in rows:
+            parsed_timestamp = parse_watchpower_timestamp(
+                row.get(timestamp_field), timezone_name
+            )
+            if parsed_timestamp is None:
+                continue
+            if latest_timestamp is None or parsed_timestamp > latest_timestamp:
+                latest_timestamp = parsed_timestamp
+                latest_row = row
+
+        if latest_row is not None:
+            return {"data": latest_row, "reading_at": latest_timestamp}
+
+        logger.warning(
+            "CSV file for %s has no valid %s values; falling back to last row",
+            serial_number,
+            timestamp_field,
+        )
+        return {"data": fallback_row, "reading_at": None}

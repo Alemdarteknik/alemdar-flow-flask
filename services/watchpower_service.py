@@ -6,12 +6,14 @@ Handles authentication and data fetching from WatchPower API
 import json
 import logging
 import os
-from datetime import date
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from requests.exceptions import Timeout as RequestsTimeout
 from watchpower_api import WatchPowerAPI
 from watchpower_api.models import DeviceIdentifier
+
+from utils.telemetry_time import parse_watchpower_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,11 @@ logger = logging.getLogger(__name__)
 class WatchPowerService:
     """Service class to manage WatchPower API interactions"""
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        timezone_name: Optional[str] = None,
+    ):
         """
         Initialize WatchPower service
 
@@ -31,6 +37,9 @@ class WatchPowerService:
         self.authenticated = False
         self.inverters: List[Dict[str, Any]] = []
         self.api_sessions: Dict[tuple[str, str], WatchPowerAPI] = {}
+        self.timezone_name = timezone_name or os.getenv(
+            "WATCHPOWER_TIMEZONE", "Europe/Nicosia"
+        )
         self.daily_retry_attempts = max(
             1, int(os.getenv("WATCHPOWER_DAILY_RETRY_ATTEMPTS", 2))
         )
@@ -246,48 +255,34 @@ class WatchPowerService:
                 f"WatchPower API response for {serial_number}: {raw_data is not None}"
             )
 
-            # Extract latest reading (last row)
             if raw_data and "dat" in raw_data and "row" in raw_data["dat"]:
                 rows = raw_data["dat"]["row"]
-                titles_data = raw_data["dat"].get("title", [])
-
-                # Extract title strings from title objects
-                titles = []
-                if titles_data:
-                    if isinstance(titles_data[0], dict) and "title" in titles_data[0]:
-                        titles = [t["title"] for t in titles_data]
-                    else:
-                        titles = titles_data
+                titles = self._extract_titles(raw_data["dat"].get("title", []))
 
                 if rows:
-                    latest_row_obj = rows[-1]  # Get last entry
-
-                    # Extract values from 'field' array if present, otherwise use the row directly
-                    latest_values = (
-                        latest_row_obj.get("field", latest_row_obj)
-                        if isinstance(latest_row_obj, dict)
-                        else latest_row_obj
+                    data_dict, reading_at = self._select_latest_row_payload(
+                        rows=rows,
+                        titles=titles,
+                        serial_number=serial_number,
                     )
+                    if data_dict is not None:
+                        data_dict["serial_number"] = serial_number
+                        data_dict["alias"] = inverter_config.get("alias", serial_number)
+                        data_dict["system_type"] = inverter_config.get(
+                            "system_type", "unknown"
+                        )
 
-                    # Create dictionary mapping titles to values
-                    data_dict = {}
-                    for i, title in enumerate(titles):
-                        if i < len(latest_values):
-                            data_dict[title] = latest_values[i]
-
-                    # Add metadata
-                    data_dict["serial_number"] = serial_number
-                    data_dict["alias"] = inverter_config.get("alias", serial_number)
-                    data_dict["system_type"] = inverter_config.get(
-                        "system_type", "unknown"
-                    )
-
-                    logger.info(f"Successfully fetched latest data for {serial_number}")
-                    return {
-                        "data": data_dict,
-                        "raw": raw_data,
-                        "inverter_config": inverter_config,
-                    }
+                        logger.info(
+                            "Successfully fetched latest data for %s at %s",
+                            serial_number,
+                            reading_at.isoformat() if reading_at else "unknown time",
+                        )
+                        return {
+                            "data": data_dict,
+                            "raw": raw_data,
+                            "inverter_config": inverter_config,
+                            "reading_at": reading_at,
+                        }
 
             logger.warning(f"No data rows found for {serial_number}")
             return None
@@ -295,6 +290,90 @@ class WatchPowerService:
         except Exception as e:
             logger.error(f"Failed to fetch data for {serial_number}: {e}")
             return None
+
+    def _extract_titles(self, titles_data: List[Any]) -> List[str]:
+        if not titles_data:
+            return []
+        if isinstance(titles_data[0], dict) and "title" in titles_data[0]:
+            return [str(title.get("title", "")).strip() for title in titles_data]
+        return [str(title).strip() for title in titles_data]
+
+    def _build_row_payload(self, row_obj: Any, titles: List[str]) -> Dict[str, Any]:
+        values = (
+            row_obj.get("field", row_obj) if isinstance(row_obj, dict) else row_obj
+        )
+        if not isinstance(values, list):
+            return {}
+
+        payload: Dict[str, Any] = {}
+        for index, title in enumerate(titles):
+            if index < len(values):
+                payload[title] = values[index]
+        return payload
+
+    def _select_latest_row_payload(
+        self, rows: List[Any], titles: List[str], serial_number: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[datetime]]:
+        fallback_payload: Optional[Dict[str, Any]] = None
+        fallback_reading_at: Optional[datetime] = None
+        latest_payload: Optional[Dict[str, Any]] = None
+        latest_reading_at: Optional[datetime] = None
+
+        for row_obj in rows:
+            payload = self._build_row_payload(row_obj, titles)
+            if not payload:
+                continue
+
+            if fallback_payload is None:
+                fallback_payload = payload
+
+            parsed_timestamp = parse_watchpower_timestamp(
+                payload.get("Data E Hora"), self.timezone_name
+            )
+            if parsed_timestamp is None:
+                continue
+
+            if latest_reading_at is None or parsed_timestamp > latest_reading_at:
+                latest_reading_at = parsed_timestamp
+                latest_payload = payload
+
+        if latest_payload is not None:
+            return latest_payload, latest_reading_at
+
+        if rows:
+            fallback_payload = self._build_row_payload(rows[-1], titles)
+            fallback_reading_at = parse_watchpower_timestamp(
+                fallback_payload.get("Data E Hora") if fallback_payload else None,
+                self.timezone_name,
+            )
+            logger.warning(
+                "WatchPower returned rows without valid timestamps for %s; falling back to last row",
+                serial_number,
+            )
+
+        return fallback_payload, fallback_reading_at
+
+    def _sort_rows_by_timestamp(self, rows: List[List[Any]], titles: List[str]) -> List[List[Any]]:
+        time_index = next(
+            (
+                index
+                for index, title in enumerate(titles)
+                if isinstance(title, str) and title.strip().lower() == "data e hora"
+            ),
+            -1,
+        )
+        if time_index < 0:
+            return rows
+
+        def sort_key(row: List[Any]) -> Tuple[int, datetime]:
+            candidate = row[time_index] if time_index < len(row) else None
+            parsed = parse_watchpower_timestamp(candidate, self.timezone_name)
+            return (
+                0 if parsed is not None else 1,
+                parsed or datetime.max.replace(tzinfo=timezone.utc),
+            )
+
+        return sorted(rows, key=sort_key)
 
     def get_all_inverters_data(self) -> Dict[str, Any]:
         """
@@ -377,6 +456,8 @@ class WatchPowerService:
                         rows.append(row["field"])
                     else:
                         rows.append(row)
+
+                rows = self._sort_rows_by_timestamp(rows=rows, titles=titles)
 
                 return {
                     "serial_number": serial_number,

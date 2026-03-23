@@ -7,15 +7,16 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from services.neon_store import NeonStore
+from services.reading_resolver import resolve_latest_reading
 from services.scheduler import PollingScheduler
 from services.watchpower_service import WatchPowerService
 from utils.csv_writer import CSVWriter
+from utils.telemetry_time import parse_watchpower_timestamp
 
 # Load environment variables
 load_dotenv()
@@ -40,14 +41,13 @@ def _read_positive_int_env(name, default):
 
 
 WATCHPOWER_TIMEZONE = os.getenv("WATCHPOWER_TIMEZONE", "Europe/Nicosia")
-WATCHPOWER_ZONE = ZoneInfo(WATCHPOWER_TIMEZONE)
 INVERTER_STALE_THRESHOLD_MINUTES = _read_positive_int_env(
     "INVERTER_STALE_THRESHOLD_MINUTES", 8
 )
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app) 
+CORS(app)
 
 # Global service instances
 watchpower_service = None
@@ -57,35 +57,7 @@ neon_store = None
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "inverters.json")
 
 
-def _parse_watchpower_timestamp(raw_timestamp):
-    if not isinstance(raw_timestamp, str):
-        return None
-
-    text = raw_timestamp.strip()
-    if not text:
-        return None
-
-    try:
-        return (
-            datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-            .replace(tzinfo=WATCHPOWER_ZONE)
-            .astimezone(timezone.utc)
-        )
-    except ValueError:
-        try:
-            parsed = datetime.fromisoformat(text)
-        except ValueError:
-            return None
-
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=WATCHPOWER_ZONE)
-        return parsed.astimezone(timezone.utc)
-
-
-def _build_telemetry_health(raw_data):
-    telemetry_timestamp = raw_data.get("Data E Hora") if isinstance(raw_data, dict) else None
-    parsed_timestamp = _parse_watchpower_timestamp(telemetry_timestamp)
-
+def _build_telemetry_health_from_timestamp(parsed_timestamp, now_utc=None):
     base_payload = {
         "threshold_minutes": INVERTER_STALE_THRESHOLD_MINUTES,
         "timezone": WATCHPOWER_TIMEZONE,
@@ -105,26 +77,11 @@ def _build_telemetry_health(raw_data):
             "stale_minutes": None,
         }
 
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(WATCHPOWER_ZONE)
-    print(f"Current UTC time:   {now_utc.isoformat()}")
-    print(f"Current local time: {now_local.isoformat()}")
-    print(f"Telemetry UTC time: {parsed_timestamp.isoformat()}")
-    print(
-        f"Telemetry local time: "
-        f"{parsed_timestamp.astimezone(WATCHPOWER_ZONE).isoformat()}"
-    )
-
-    delta_seconds = int((now_utc - parsed_timestamp).total_seconds())
-    print(f"Delta minutes: {delta_seconds / 60}")
-
-  
-    elapsed_seconds = max(0, int((now_local - parsed_timestamp).total_seconds()))
-    print(f"This is the elapsed mins: {elapsed_seconds / 60}")
+    current_time = now_utc or datetime.now(timezone.utc)
+    elapsed_seconds = max(0, int((current_time - parsed_timestamp).total_seconds()))
     stale_minutes = elapsed_seconds // 60
 
     if elapsed_seconds >= INVERTER_STALE_THRESHOLD_MINUTES * 60:
-        print("the inverter is offline")
         return {
             **base_payload,
             "state": "offline",
@@ -134,7 +91,6 @@ def _build_telemetry_health(raw_data):
             ),
             "stale_minutes": stale_minutes,
         }
-    print("the inverter is online")
     return {
         **base_payload,
         "state": "online",
@@ -142,6 +98,147 @@ def _build_telemetry_health(raw_data):
         "stale_minutes": stale_minutes,
     }
 
+
+def _build_telemetry_health(raw_data, now_utc=None):
+    telemetry_timestamp = (
+        raw_data.get("Data E Hora") if isinstance(raw_data, dict) else None
+    )
+    parsed_timestamp = parse_watchpower_timestamp(
+        telemetry_timestamp, WATCHPOWER_TIMEZONE
+    )
+    return _build_telemetry_health_from_timestamp(
+        parsed_timestamp=parsed_timestamp,
+        now_utc=now_utc,
+    )
+
+
+def _parse_optional_timestamp(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _calculate_persistence_lag_minutes(live_telemetry_at, persisted_telemetry_at):
+    if live_telemetry_at is None or persisted_telemetry_at is None:
+        return None
+    lag_seconds = int((live_telemetry_at - persisted_telemetry_at).total_seconds())
+    if lag_seconds <= 0:
+        return 0
+    return lag_seconds // 60
+
+
+def _resolve_status_timestamp(latest, scheduler_state):
+    now_utc = datetime.now(timezone.utc)
+    persisted_telemetry_at = latest.get("reading_at") if latest else None
+    live_checked_at = _parse_optional_timestamp(
+        scheduler_state.get("last_live_checked_at")
+    )
+    live_telemetry_at = _parse_optional_timestamp(
+        scheduler_state.get("last_live_telemetry_at")
+    )
+    live_grace_seconds = (
+        scheduler.live_snapshot_grace_seconds if scheduler else 120
+    )
+    live_is_recent = (
+        live_checked_at is not None
+        and int((now_utc - live_checked_at).total_seconds()) <= live_grace_seconds
+    )
+
+    if live_is_recent and live_telemetry_at is not None:
+        return {
+            "status_source": "live_snapshot",
+            "status_timestamp": live_telemetry_at,
+            "live_checked_at": live_checked_at,
+            "live_telemetry_at": live_telemetry_at,
+            "persisted_telemetry_at": persisted_telemetry_at,
+        }
+
+    return {
+        "status_source": "persisted",
+        "status_timestamp": persisted_telemetry_at,
+        "live_checked_at": live_checked_at,
+        "live_telemetry_at": live_telemetry_at,
+        "persisted_telemetry_at": persisted_telemetry_at,
+    }
+
+
+def _build_inverter_response(serial_number, inverter_config):
+    latest = resolve_latest_reading(
+        serial_number=serial_number,
+        timezone_name=WATCHPOWER_TIMEZONE,
+        neon_store=neon_store,
+        csv_writer=csv_writer,
+        cache_entry=scheduler.get_cached_data(serial_number) if scheduler else None,
+    )
+    scheduler_state = scheduler.get_inverter_state(serial_number) if scheduler else {}
+    scheduler_state = scheduler_state or {}
+    resolved_status = _resolve_status_timestamp(latest=latest, scheduler_state=scheduler_state)
+
+    latest_data = latest.get("data") if latest else None
+    status_timestamp = resolved_status["status_timestamp"]
+    if latest_data is None and status_timestamp is None:
+        return None
+
+    cached_at = None
+    if latest:
+        cached_at = latest.get("cached_at")
+    if not cached_at:
+        cached_at = (
+            scheduler_state.get("last_successful_poll_at")
+            or scheduler_state.get("last_polled_at")
+            or (
+                resolved_status["live_checked_at"].isoformat()
+                if resolved_status["live_checked_at"]
+                else None
+            )
+        )
+
+    latest_reading_at = latest.get("reading_at") if latest else None
+    live_telemetry_at = resolved_status["live_telemetry_at"]
+    persisted_telemetry_at = resolved_status["persisted_telemetry_at"]
+
+    return {
+        "success": True,
+        "serial_number": serial_number,
+        "data": latest_data,
+        "telemetry_health": _build_telemetry_health_from_timestamp(
+            parsed_timestamp=status_timestamp
+        ),
+        "cached_at": cached_at,
+        "last_poll": (
+            scheduler.last_poll_time.isoformat() if scheduler and scheduler.last_poll_time else None
+        ),
+        "latest_reading_at": (
+            latest_reading_at.isoformat() if latest_reading_at else None
+        ),
+        "last_successful_poll_at": scheduler_state.get("last_successful_poll_at"),
+        "next_poll_due_at": scheduler_state.get("next_poll_due_at"),
+        "status_source": resolved_status["status_source"],
+        "data_source": latest.get("data_source") if latest else None,
+        "live_telemetry_timestamp": (
+            live_telemetry_at.isoformat() if live_telemetry_at else None
+        ),
+        "live_checked_at": (
+            resolved_status["live_checked_at"].isoformat()
+            if resolved_status["live_checked_at"]
+            else None
+        ),
+        "persisted_telemetry_timestamp": (
+            persisted_telemetry_at.isoformat() if persisted_telemetry_at else None
+        ),
+        "persistence_lag_minutes": _calculate_persistence_lag_minutes(
+            live_telemetry_at=live_telemetry_at,
+            persisted_telemetry_at=persisted_telemetry_at,
+        ),
+        "inverter_config": (latest.get("inverter_config") if latest else None)
+        or inverter_config,
+    }
 
 def _load_inverters_config():
     """Load inverter configs from disk"""
@@ -168,7 +265,9 @@ def init_services():
     logger.info("Initializing services...")
 
     # Initialize services
-    watchpower_service = WatchPowerService(CONFIG_PATH)
+    watchpower_service = WatchPowerService(
+        CONFIG_PATH, timezone_name=WATCHPOWER_TIMEZONE
+    )
     csv_writer = CSVWriter(data_dir="data")
     neon_store = NeonStore(
         database_url=os.getenv("NEON_DATABASE_URL"),
@@ -191,6 +290,11 @@ def init_services():
         poll_interval_minutes=poll_interval,
         poll_retry_attempts=poll_retry_attempts,
         poll_retry_backoff_seconds=poll_retry_backoff_seconds,
+        tick_seconds=int(os.getenv("POLL_TICK_SECONDS", 15)),
+        timezone_name=WATCHPOWER_TIMEZONE,
+        live_status_refresh_seconds=int(
+            os.getenv("LIVE_STATUS_REFRESH_SECONDS", 60)
+        ),
     )
 
     if neon_store.enabled:
@@ -242,6 +346,38 @@ def get_inverters():
         )
     except Exception as e:
         logger.error(f"Error fetching inverters list: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/inverters/status", methods=["GET"])
+def get_inverters_status():
+    """Get current status payloads for all configured inverters."""
+    try:
+        if not watchpower_service or not scheduler:
+            return jsonify({"error": "Service not initialized"}), 503
+
+        payloads = []
+        for inverter in watchpower_service.inverters:
+            serial_number = str(inverter.get("serial_number") or "")
+            if not serial_number:
+                continue
+
+            response_payload = _build_inverter_response(
+                serial_number=serial_number,
+                inverter_config=inverter,
+            )
+            if response_payload is not None:
+                payloads.append(response_payload)
+
+        return jsonify(
+            {
+                "success": True,
+                "count": len(payloads),
+                "inverters": payloads,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error fetching inverter status list: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -376,7 +512,7 @@ def upsert_inverter():
 
 @app.route("/api/inverter/<serial_number>", methods=["GET"])
 def get_inverter_data(serial_number):
-    """Get latest data for a specific inverter (from cache)"""
+    """Get latest data for a specific inverter."""
     try:
         if not scheduler:
             return jsonify({"error": "Scheduler not initialized"}), 503
@@ -391,55 +527,25 @@ def get_inverter_data(serial_number):
             None,
         )
 
-        # Get cached data
-        cached_data = scheduler.get_cached_data(serial_number)
-
-        # If not cached yet, try to fetch directly and populate cache
-        if not cached_data:
-            logger.info(
-                f"Cache miss for {serial_number}. Fetching latest data directly from WatchPower API"
-            )
-            latest = watchpower_service.get_latest_data(serial_number)
-            if latest and "data" in latest:
-                # Store in cache for future requests
-                scheduler.cache[serial_number] = {
-                    "data": latest["data"],
-                    "timestamp": latest["data"].get("Data E Hora")
-                    or datetime.now().isoformat(),
-                    "csv_written": False,
-                    "inverter_config": latest.get("inverter_config"),
-                }
-                cached_data = scheduler.cache[serial_number]
-            else:
-                return (
-                    jsonify(
-                        {
-                            "error": "No data available for this inverter",
-                            "serial_number": serial_number,
-                        }
-                    ),
-                    404,
-                )
-
-        return jsonify(
-            {
-                "success": True,
-                "serial_number": serial_number,
-                "data": cached_data["data"],
-                "telemetry_health": _build_telemetry_health(cached_data["data"]),
-                "cached_at": cached_data["timestamp"],
-                "last_poll": (
-                    scheduler.last_poll_time.isoformat()
-                    if scheduler.last_poll_time
-                    else None
-                ),
-                "inverter_config": cached_data.get("inverter_config")
-                or inverter_config,
-            }
+        response_payload = _build_inverter_response(
+            serial_number=serial_number,
+            inverter_config=inverter_config,
         )
+        if not response_payload or not response_payload.get("data"):
+            return (
+                jsonify(
+                    {
+                        "error": "No data available for this inverter",
+                        "serial_number": serial_number,
+                    }
+                ),
+                404,
+            )
+        return jsonify(response_payload)
     except Exception as e:
         logger.error(f"Error fetching data for {serial_number}: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/api/inverter/<serial_number>/history", methods=["GET"])
