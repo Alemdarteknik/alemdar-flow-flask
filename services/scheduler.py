@@ -315,21 +315,22 @@ class PollingScheduler:
 
                     if self.neon_store and self.neon_store.enabled:
                         try:
-                            self.neon_store.upsert_inverter(
-                                inverter_data.get("inverter_config") or {}
-                            )
-                            self.neon_store.persist_reading(
-                                serial_number=serial_number,
-                                raw_data=data_dict,
-                                source="poll",
-                            )
-                            self.neon_store.record_poll_outcome(
-                                serial_number=serial_number,
-                                alias=alias,
-                                status="success",
-                                attempts=fetch_result["attempts"],
-                                error_text=None,
-                            )
+                            with self.neon_store.connection() as conn:
+                                self.neon_store.persist_reading(
+                                    serial_number=serial_number,
+                                    raw_data=data_dict,
+                                    source="poll",
+                                    conn=conn,
+                                )
+                                self.neon_store.record_poll_outcome(
+                                    serial_number=serial_number,
+                                    alias=alias,
+                                    status="success",
+                                    attempts=fetch_result["attempts"],
+                                    error_text=None,
+                                    conn=conn,
+                                )
+                                conn.commit()
                         except Exception as neon_error:
                             logger.error(
                                 "Failed to persist poll data to Neon for %s: %s",
@@ -361,13 +362,16 @@ class PollingScheduler:
 
             if persist_reading and self.neon_store and self.neon_store.enabled:
                 try:
-                    self.neon_store.record_poll_outcome(
-                        serial_number=serial_number,
-                        alias=alias,
-                        status="no_data",
-                        attempts=fetch_result["attempts"],
-                        error_text=fetch_result["error"],
-                    )
+                    with self.neon_store.connection() as conn:
+                        self.neon_store.record_poll_outcome(
+                            serial_number=serial_number,
+                            alias=alias,
+                            status="no_data",
+                            attempts=fetch_result["attempts"],
+                            error_text=fetch_result["error"],
+                            conn=conn,
+                        )
+                        conn.commit()
                 except Exception as neon_error:
                     logger.error(
                         "Failed to persist poll audit to Neon for %s: %s",

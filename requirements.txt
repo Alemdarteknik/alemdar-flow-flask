@@ -4,3 +4,4 @@ python-dotenv==1.0.1
 requests==2.32.3
 watchpower-api==0.3.0
 psycopg[binary]==3.2.9
+psycopg-pool==3.2.7

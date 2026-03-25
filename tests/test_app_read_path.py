@@ -28,9 +28,15 @@ class StubNeonStore:
     def __init__(self, latest):
         self.enabled = True
         self._latest = latest
+        self.fetch_latest_calls = 0
+        self.summary_samples = []
 
     def fetch_latest_reading(self, serial_number):
+        self.fetch_latest_calls += 1
         return self._latest
+
+    def fetch_energy_summary_samples(self, serial_number, since=None):
+        return list(self.summary_samples)
 
 
 class StubCsvWriter:
@@ -39,6 +45,9 @@ class StubCsvWriter:
 
     def read_freshest(self, serial_number, timestamp_field="Data E Hora", timezone_name="Europe/Nicosia"):
         return self._latest
+
+    def get_all_data(self, serial_number):
+        return []
 
 
 class StubWatchPowerService:
@@ -71,7 +80,7 @@ class AppReadPathTests(unittest.TestCase):
         flask_app_module.watchpower_service = self.original_watchpower_service
         flask_app_module.INVERTER_STALE_THRESHOLD_MINUTES = self.original_threshold
 
-    def test_get_inverter_prefers_persisted_latest_reading_over_cache(self):
+    def test_get_inverter_prefers_cache_for_warm_reads(self):
         serial_number = "INV-001"
         cache_entry = {
             "data": {"Data E Hora": "2026-03-19 11:10:00", "Load Status": "Load on"},
@@ -108,12 +117,45 @@ class AppReadPathTests(unittest.TestCase):
         first_payload = first.get_json()
         second_payload = second.get_json()
 
-        self.assertEqual(first_payload["data"]["Data E Hora"], "2026-03-19 11:15:00")
-        self.assertEqual(first_payload["data_source"], "neon")
-        self.assertEqual(first_payload["latest_reading_at"], "2026-03-19T09:15:00+00:00")
-        self.assertEqual(first_payload["cached_at"], "2026-03-19T09:16:00+00:00")
+        self.assertEqual(first_payload["data"]["Data E Hora"], "2026-03-19 11:10:00")
+        self.assertEqual(first_payload["data_source"], "cache")
+        self.assertEqual(first_payload["latest_reading_at"], "2026-03-19T09:10:00+00:00")
+        self.assertEqual(first_payload["cached_at"], "2026-03-19T09:10:30+00:00")
         self.assertEqual(first_payload["status_source"], "persisted")
-        self.assertEqual(second_payload["data"]["Data E Hora"], "2026-03-19 11:15:00")
+        self.assertEqual(second_payload["data"]["Data E Hora"], "2026-03-19 11:10:00")
+        self.assertEqual(flask_app_module.neon_store.fetch_latest_calls, 0)
+
+    def test_get_inverter_falls_back_to_persisted_reading_when_cache_empty(self):
+        serial_number = "INV-001"
+        persisted = {
+            "data": {"Data E Hora": "2026-03-19 11:15:00", "Load Status": "Load on"},
+            "reading_at": datetime(2026, 3, 19, 9, 15, tzinfo=timezone.utc),
+            "polled_at": datetime(2026, 3, 19, 9, 16, tzinfo=timezone.utc),
+        }
+        scheduler_state = {
+            "last_successful_poll_at": "2026-03-19T09:16:00+00:00",
+            "last_polled_at": "2026-03-19T09:16:00+00:00",
+            "next_poll_due_at": "2026-03-19T09:20:00+00:00",
+            "last_live_checked_at": None,
+            "last_live_telemetry_at": None,
+        }
+
+        flask_app_module.scheduler = StubScheduler(
+            cache_entry=None,
+            state=scheduler_state,
+            last_poll_time=datetime(2026, 3, 19, 9, 16, tzinfo=timezone.utc),
+        )
+        flask_app_module.neon_store = StubNeonStore(persisted)
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+
+        response = self.client.get(f"/api/inverter/{serial_number}")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["data"]["Data E Hora"], "2026-03-19 11:15:00")
+        self.assertEqual(payload["data_source"], "neon")
+        self.assertEqual(flask_app_module.neon_store.fetch_latest_calls, 1)
 
     def test_get_inverter_prefers_live_snapshot_for_status_when_fresher(self):
         serial_number = "INV-001"
@@ -223,6 +265,48 @@ class AppReadPathTests(unittest.TestCase):
         self.assertEqual(online["stale_minutes"], 6)
         self.assertEqual(offline["state"], "offline")
         self.assertEqual(offline["stale_minutes"], 11)
+
+    def test_energy_summary_endpoint_returns_server_side_summary(self):
+        serial_number = "INV-001"
+        now = datetime(2026, 3, 19, 9, 0, tzinfo=timezone.utc)
+        neon_store = StubNeonStore(latest=None)
+        neon_store.summary_samples = [
+            {
+                "reading_at": now,
+                "load_power_w": 1000,
+                "pv_power_w": 600,
+                "grid_power_w": 400,
+                "raw_payload": {
+                    "Battery Voltage": "50",
+                    "Battery Charging Current": "0",
+                    "Battery Discharge Current": "0",
+                },
+            },
+            {
+                "reading_at": now.replace(minute=30),
+                "load_power_w": 1000,
+                "pv_power_w": 600,
+                "grid_power_w": 400,
+                "raw_payload": {
+                    "Battery Voltage": "50",
+                    "Battery Charging Current": "0",
+                    "Battery Discharge Current": "0",
+                },
+            },
+        ]
+
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = neon_store
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+
+        response = self.client.get(f"/api/inverter/{serial_number}/energy-summary")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["inverterId"], serial_number)
+        self.assertEqual(len(payload["data"]["daily30d"]), 30)
 
 if __name__ == "__main__":
     unittest.main()

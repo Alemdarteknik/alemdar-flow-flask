@@ -6,11 +6,12 @@ Backend service for WatchPower API integration
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from services.energy_summary import build_energy_summary
 from services.neon_store import NeonStore
 from services.reading_resolver import resolve_latest_reading
 from services.scheduler import PollingScheduler
@@ -175,6 +176,7 @@ def _build_inverter_response(serial_number, inverter_config):
         neon_store=neon_store,
         csv_writer=csv_writer,
         cache_entry=scheduler.get_cached_data(serial_number) if scheduler else None,
+        prefer_cache=True,
     )
     scheduler_state = scheduler.get_inverter_state(serial_number) if scheduler else {}
     scheduler_state = scheduler_state or {}
@@ -258,6 +260,15 @@ def _write_inverters_config(inverters):
         json.dump(inverters, f, indent=2)
 
 
+def _coerce_float(value):
+    try:
+        if value in (None, ""):
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def init_services():
     """Initialize all services"""
     global watchpower_service, csv_writer, scheduler, neon_store
@@ -300,8 +311,9 @@ def init_services():
     if neon_store.enabled:
         try:
             neon_store.ensure_poll_audit_table()
+            neon_store.ensure_inverter_readings_indexes()
         except Exception as e:
-            logger.error("Failed to ensure poll audit table in Neon: %s", e)
+            logger.error("Failed to ensure Neon runtime objects: %s", e)
 
         for inverter in watchpower_service.inverters:
             try:
@@ -497,6 +509,15 @@ def upsert_inverter():
         if watchpower_service:
             watchpower_service.load_inverters_config(CONFIG_PATH)
             watchpower_service.authenticate()
+        if neon_store and neon_store.enabled:
+            try:
+                neon_store.upsert_inverter(inverter)
+            except Exception as e:
+                logger.error(
+                    "Failed to upsert inverter %s in Neon after config change: %s",
+                    inverter["serial_number"],
+                    e,
+                )
 
         return jsonify(
             {
@@ -592,6 +613,63 @@ def get_inverter_history(serial_number):
         )
     except Exception as e:
         logger.error(f"Error fetching history for {serial_number}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/inverter/<serial_number>/energy-summary", methods=["GET"])
+def get_inverter_energy_summary(serial_number):
+    """Get server-side energy summaries for a specific inverter."""
+    try:
+        samples = []
+        since = datetime.now(timezone.utc) - timedelta(days=400)
+        if neon_store and neon_store.enabled:
+            try:
+                samples = neon_store.fetch_energy_summary_samples(
+                    serial_number=serial_number,
+                    since=since,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to read energy summary samples from Neon for %s: %s. Falling back to CSV.",
+                    serial_number,
+                    e,
+                )
+
+        if not samples:
+            if not csv_writer:
+                return jsonify({"error": "CSV writer not initialized"}), 503
+
+            rows = csv_writer.get_all_data(serial_number)
+            samples = []
+            for row in rows:
+                parsed_timestamp = parse_watchpower_timestamp(
+                    row.get("Data E Hora"), WATCHPOWER_TIMEZONE
+                )
+                if parsed_timestamp is None:
+                    continue
+                samples.append(
+                    {
+                        "reading_at": parsed_timestamp,
+                        "load_power_w": row.get("AC Output Active Power"),
+                        "pv_power_w": (
+                            _coerce_float(
+                                row.get("PV1 Charging Power")
+                                or row.get("PV1 Charging power")
+                            )
+                            + _coerce_float(
+                                row.get("PV2 Charging Power")
+                                or row.get("PV2 Charging power")
+                            )
+                        ),
+                        "grid_power_w": 0,
+                        "raw_payload": row,
+                    }
+                )
+
+        summary = build_energy_summary(serial_number, samples)
+        return jsonify({"success": True, "data": summary})
+    except Exception as e:
+        logger.error(f"Error fetching energy summary for {serial_number}: {e}")
         return jsonify({"error": str(e)}), 500
 
 

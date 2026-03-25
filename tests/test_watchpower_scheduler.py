@@ -46,6 +46,67 @@ class StubWatchPowerService:
         return self.responses[serial_number]
 
 
+class StubConnection:
+    def __init__(self):
+        self.commit_calls = 0
+
+    def commit(self):
+        self.commit_calls += 1
+
+
+class StubConnectionContext:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self.conn
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class StubNeonStore:
+    def __init__(self):
+        self.enabled = True
+        self.connection_object = StubConnection()
+        self.persist_calls = []
+        self.audit_calls = []
+        self.connection_calls = 0
+        self.upsert_calls = []
+
+    def connection(self):
+        self.connection_calls += 1
+        return StubConnectionContext(self.connection_object)
+
+    def persist_reading(self, serial_number, raw_data, source, conn=None):
+        self.persist_calls.append(
+            {
+                "serial_number": serial_number,
+                "raw_data": raw_data,
+                "source": source,
+                "conn": conn,
+            }
+        )
+        return True
+
+    def record_poll_outcome(
+        self, serial_number, alias, status, attempts, error_text=None, conn=None
+    ):
+        self.audit_calls.append(
+            {
+                "serial_number": serial_number,
+                "alias": alias,
+                "status": status,
+                "attempts": attempts,
+                "error_text": error_text,
+                "conn": conn,
+            }
+        )
+
+    def upsert_inverter(self, inverter_config, conn=None):
+        self.upsert_calls.append({"inverter_config": inverter_config, "conn": conn})
+
+
 class WatchPowerLatestDataTests(unittest.TestCase):
     def test_get_latest_data_uses_max_timestamp_not_last_row(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as config_file:
@@ -322,6 +383,37 @@ class PollingSchedulerTests(unittest.TestCase):
             datetime.fromisoformat(state["next_poll_due_at"]),
             result["checked_at"],
         )
+
+    def test_successful_poll_persists_reading_and_audit_in_one_connection(self):
+        now = datetime.now(timezone.utc)
+        response = {
+            "data": {"Data E Hora": now.strftime("%Y-%m-%d %H:%M:%S")},
+            "reading_at": now,
+            "inverter_config": {"serial_number": "INV-A"},
+        }
+        neon_store = StubNeonStore()
+        scheduler = PollingScheduler(
+            watchpower_service=StubWatchPowerService({"INV-A": response}),
+            csv_writer=StubCsvWriter(),
+            neon_store=neon_store,
+            poll_interval_minutes=5,
+            poll_retry_attempts=1,
+            poll_retry_backoff_seconds=0,
+            tick_seconds=1,
+        )
+
+        result = scheduler.refresh_inverter(
+            "INV-A", persist_reading=True, update_live_snapshot=True
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(neon_store.connection_calls, 1)
+        self.assertEqual(len(neon_store.persist_calls), 1)
+        self.assertEqual(len(neon_store.audit_calls), 1)
+        self.assertEqual(neon_store.connection_object.commit_calls, 1)
+        self.assertIs(neon_store.persist_calls[0]["conn"], neon_store.connection_object)
+        self.assertIs(neon_store.audit_calls[0]["conn"], neon_store.connection_object)
+        self.assertEqual(neon_store.upsert_calls, [])
 
 
 if __name__ == "__main__":

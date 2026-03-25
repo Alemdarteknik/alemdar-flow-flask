@@ -36,7 +36,13 @@ def resolve_latest_reading(
     neon_store=None,
     csv_writer=None,
     cache_entry: Optional[Dict[str, Any]] = None,
+    prefer_cache: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    if prefer_cache:
+        cached = _resolve_cache_entry(cache_entry=cache_entry, timezone_name=timezone_name)
+        if cached:
+            return cached
+
     if neon_store and getattr(neon_store, "enabled", False):
         latest = neon_store.fetch_latest_reading(serial_number)
         if latest:

@@ -5,12 +5,18 @@ Neon persistence service for inverter metadata and readings.
 import hashlib
 import json
 import logging
+import threading
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError:  # pragma: no cover - fallback for environments without pool package
+    ConnectionPool = None
 
 from utils.telemetry_time import parse_watchpower_timestamp
 
@@ -41,11 +47,36 @@ class NeonStore:
         self.enabled = bool(database_url)
         self.timezone_name = timezone_name or "Europe/Istanbul"
         self._tz = ZoneInfo(self.timezone_name)
+        self._pool = None
+        self._pool_lock = threading.Lock()
 
-    def _connect(self):
+    def _get_pool(self):
+        if not self.enabled or not self.database_url or ConnectionPool is None:
+            return None
+
+        with self._pool_lock:
+            if self._pool is None:
+                self._pool = ConnectionPool(
+                    self.database_url,
+                    min_size=1,
+                    max_size=4,
+                    kwargs={"row_factory": dict_row},
+                )
+            return self._pool
+
+    @contextmanager
+    def connection(self):
+        pool = self._get_pool()
+        if pool is not None:
+            with pool.connection() as conn:
+                yield conn
+            return
+
         if not self.database_url:
             raise RuntimeError("NEON_DATABASE_URL is not configured")
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+
+        with psycopg.connect(self.database_url, row_factory=dict_row) as conn:
+            yield conn
 
     def _parse_reading_at(self, raw_data: Dict[str, Any]) -> datetime:
         parsed = parse_watchpower_timestamp(raw_data.get("Data E Hora"), self._tz)
@@ -88,7 +119,7 @@ class NeonStore:
             "grid_frequency_hz": _first_number(raw_data, ["Grid Frequency"]),
         }
 
-    def upsert_inverter(self, inverter_config: Dict[str, Any]) -> None:
+    def upsert_inverter(self, inverter_config: Dict[str, Any], conn=None) -> None:
         if not self.enabled:
             return
 
@@ -140,10 +171,11 @@ class NeonStore:
             "device_address": inverter_config.get("device_address"),
         }
 
-        with self._connect() as conn:
-            with conn.cursor() as cur:
+        with (nullcontext(conn) if conn is not None else self.connection()) as active_conn:
+            with active_conn.cursor() as cur:
                 cur.execute(sql, params)
-            conn.commit()
+            if conn is None:
+                active_conn.commit()
 
     def ensure_poll_audit_table(self) -> None:
         """Create scheduler poll audit table if it doesn't exist."""
@@ -169,9 +201,35 @@ class NeonStore:
                 ON public.inverter_poll_audit (status, polled_at DESC);
         """
 
-        with self._connect() as conn:
+        with self.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql)
+            conn.commit()
+
+    def ensure_inverter_readings_indexes(self) -> None:
+        """Ensure hot-path read indexes exist for persisted telemetry."""
+        if not self.enabled:
+            return
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.inverter_readings') AS table_name")
+                row = cur.fetchone() or {}
+                if not row.get("table_name"):
+                    return
+
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS inverter_readings_serial_reading_hash_idx
+                    ON public.inverter_readings (serial_number, reading_at, source_row_hash)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS inverter_readings_serial_reading_desc_idx
+                    ON public.inverter_readings (serial_number, reading_at DESC)
+                    """
+                )
             conn.commit()
 
     def persist_reading(
@@ -179,6 +237,7 @@ class NeonStore:
         serial_number: str,
         raw_data: Dict[str, Any],
         source: str,
+        conn=None,
     ) -> bool:
         if not self.enabled:
             return False
@@ -228,11 +287,12 @@ class NeonStore:
             "source_row_hash": row_hash,
         }
 
-        with self._connect() as conn:
-            with conn.cursor() as cur:
+        with (nullcontext(conn) if conn is not None else self.connection()) as active_conn:
+            with active_conn.cursor() as cur:
                 cur.execute(sql, params)
                 inserted = cur.rowcount > 0
-            conn.commit()
+            if conn is None:
+                active_conn.commit()
         return inserted
 
     def record_poll_outcome(
@@ -242,6 +302,7 @@ class NeonStore:
         status: str,
         attempts: int,
         error_text: Optional[str] = None,
+        conn=None,
     ) -> None:
         if not self.enabled:
             return
@@ -258,8 +319,8 @@ class NeonStore:
             VALUES (%s, %s, %s, %s, %s, 'scheduler')
         """
 
-        with self._connect() as conn:
-            with conn.cursor() as cur:
+        with (nullcontext(conn) if conn is not None else self.connection()) as active_conn:
+            with active_conn.cursor() as cur:
                 cur.execute(
                     sql,
                     (
@@ -270,13 +331,14 @@ class NeonStore:
                         error_text,
                     ),
                 )
-            conn.commit()
+            if conn is None:
+                active_conn.commit()
 
     def fetch_history(self, serial_number: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
 
-        with self._connect() as conn:
+        with self.connection() as conn:
             with conn.cursor() as cur:
                 if limit and limit > 0:
                     cur.execute(
@@ -367,7 +429,7 @@ class NeonStore:
         if not self.enabled:
             return None
 
-        with self._connect() as conn:
+        with self.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -385,3 +447,26 @@ class NeonStore:
             return None
 
         return self._normalize_reading_row(row)
+
+    def fetch_energy_summary_samples(
+        self,
+        serial_number: str,
+        since: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        if not self.enabled:
+            return []
+
+        sql = """
+            SELECT reading_at, load_power_w, pv_power_w, grid_power_w, raw_payload
+            FROM public.inverter_readings
+            WHERE serial_number = %s
+              AND (%s IS NULL OR reading_at >= %s)
+            ORDER BY reading_at ASC
+        """
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (serial_number, since, since))
+                rows = cur.fetchall()
+
+        return [dict(row) for row in rows]
