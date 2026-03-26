@@ -8,7 +8,8 @@
     "alias": "OG-001",
     "description": "Didem",
     "username": "Didem",
-    "password": "didem2026"
+    "password": "didem2026",
+    "location": "Girne"
   },
   {
     "serial_number": "00202507000200",
@@ -19,7 +20,8 @@
     "alias": "OG-001",
     "description": "Didem",
     "username": "Didem",
-    "password": "didem2026"
+    "password": "didem2026",
+    "location": "Girne"
   },
   {
     "serial_number": "00202504011400",
@@ -30,7 +32,8 @@
     "alias": "OG-002",
     "description": "Baskent",
     "username": "Baskent",
-    "password": "Baskent12345.."
+    "password": "Baskent12345..",
+    "location": "Lefkosa"
   },
   {
     "serial_number": "00202503003450",
@@ -41,7 +44,8 @@
     "alias": "OG-003",
     "description": "Süleyman ",
     "username": "S%C3%BCleyman1",
-    "password": "suleyman"
+    "password": "suleyman",
+    "location": "Girne"
   },
   {
     "serial_number": "00202503003370",
@@ -52,7 +56,8 @@
     "alias": "OG-003",
     "description": "Süleyman",
     "username": "S%C3%BCleyman1",
-    "password": "suleyman"
+    "password": "suleyman",
+    "location": "Girne"
   },
   {
     "serial_number": "00202503001120",
@@ -63,7 +68,8 @@
     "alias": "OG-003",
     "description": "Süleyman",
     "username": "S%C3%BCleyman1",
-    "password": "suleyman"
+    "password": "suleyman",
+    "location": "Girne"
   },
   {
     "serial_number": "00202503003440",
@@ -74,7 +80,8 @@
     "alias": "OG-004",
     "description": "Baryo",
     "username": "baryo",
-    "password": "Baryo2025"
+    "password": "Baryo2025",
+    "location": "Esentepe"
   },
   {
     "serial_number": "00202503001200",
@@ -85,7 +92,8 @@
     "alias": "OG-004",
     "description": "Baryo",
     "username": "baryo",
-    "password": "Baryo2025"
+    "password": "Baryo2025",
+    "location": "Esentepe"
   },
   {
     "serial_number": "00202504011260",
@@ -96,7 +104,8 @@
     "alias": "OG-005",
     "description": "yildizkabaran",
     "username": "yildizkabaran",
-    "password": "(startl3d)"
+    "password": "(startl3d)",
+    "location": "Gönyeli"
   },
   {
     "serial_number": "00202504011340",
@@ -107,7 +116,9 @@
     "alias": "OG-005",
     "description": "yildizkabaran",
     "username": "yildizkabaran",
-    "password": "(startl3d)"
+    "password": "(startl3d)",
+    "location": "Gönyeli"
+
   },
   {
     "serial_number": "00202504011270",
@@ -118,7 +129,8 @@
     "alias": "OG-006",
     "description": "Fatma ruso",
     "username": "Fatma+ruso",
-    "password": "196319651"
+    "password": "196319651",
+    "location": "Serdarli"
   },
   {
     "serial_number": "00202504011450",
@@ -129,7 +141,9 @@
     "alias": "OG-007",
     "description": "Songül",
     "username": "Song%C3%BCl",
-    "password": "vasit1978"
+    "password": "vasit1978",
+    "location": "Serdarli"
+
   },
   {
     "serial_number": "00202211004500",
@@ -140,7 +154,8 @@
     "alias": "OG-008",
     "description": "Gonul",
     "username": "gonul2026",
-    "password": "gonul2026"
+    "password": "gonul2026",
+    "location": "Yesilirmak"
   },
   {
     "serial_number": "00202507000990",
@@ -151,7 +166,8 @@
     "alias": "OG-009",
     "description": "Kadirguler",
     "username": "kadirguler",
-    "password": "Cimbom1661"
+    "password": "Cimbom1661",
+    "location": "Girne"
   },
   {
     "serial_number": "00202504011430",
@@ -162,6 +178,19 @@
     "alias": "OG-010",
     "description": "Omer",
     "username": "omer%20kocaman",
-    "password": "omer123kocaman"
+    "password": "omer123kocaman",
+    "location": "Serdarli"
+  },
+  {
+    "serial_number": "00202504010210",
+    "wifi_pn": "W0056406234607",
+    "device_code": 2449,
+    "device_address": 1,
+    "system_type": "offgrid",
+    "alias": "OG-011",
+    "description": "Ragip Kanatli",
+    "username": "ragip.kanatli",
+    "password": "881215",
+    "location": "Airport Area"
   }
 ]
