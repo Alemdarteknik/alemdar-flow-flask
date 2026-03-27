@@ -489,6 +489,7 @@ class WatchPowerService:
                 "alias": inv.get("alias", inv["serial_number"]),
                 "system_type": inv.get("system_type", "unknown"),
                 "description": inv.get("description", ""),
+                "location": inv.get("location", ""),
             }
             for inv in self.inverters
         ]
