@@ -6,12 +6,13 @@ Backend service for WatchPower API integration
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+import re
+import unicodedata
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from services.energy_summary import build_energy_summary
 from services.neon_store import NeonStore
 from services.reading_resolver import resolve_latest_reading
 from services.scheduler import PollingScheduler
@@ -120,6 +121,21 @@ def _parse_optional_timestamp(value):
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_required_utc_timestamp_arg(name):
+    raw_value = request.args.get(name, "").strip()
+    if not raw_value:
+        raise ValueError(f"Missing required query parameter: {name}")
+
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"Invalid ISO timestamp for {name}") from error
+
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
@@ -258,6 +274,134 @@ def _write_inverters_config(inverters):
     """Write inverter configs to disk"""
     with open(CONFIG_PATH, "w") as f:
         json.dump(inverters, f, indent=2)
+
+
+def _normalize_group_token(input_value):
+    normalized = (
+        unicodedata.normalize("NFKD", str(input_value or ""))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+        .strip()
+    )
+    normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+    normalized = re.sub(r"^-+|-+$", "", normalized)
+    return normalized[:80] or "unknown-user"
+
+
+def _pick_grouping_base(inverter):
+    alias = str(inverter.get("alias") or "").strip()
+    if alias:
+        return alias
+
+    username = str(inverter.get("username") or "").strip()
+    if username:
+        return username
+
+    description = str(inverter.get("description") or "").strip()
+    if description:
+        return description
+
+    return "unknown-user"
+
+
+def _pick_group_display_name(inverter):
+    description = str(inverter.get("description") or "").strip()
+    if description:
+        return description
+
+    return "Unknown User"
+
+
+def _group_inverters_by_user(inverters):
+    groups = {}
+
+    for inverter in inverters:
+        serial_number = str(inverter.get("serial_number") or "").strip()
+        if not serial_number:
+            continue
+
+        group_key = _normalize_group_token(_pick_grouping_base(inverter))
+        display_name = _pick_group_display_name(inverter)
+        existing = groups.get(group_key)
+
+        if existing is not None:
+            existing["inverterIds"].append(serial_number)
+            if (
+                existing["displayName"] == "Unknown User"
+                and display_name != "Unknown User"
+            ):
+                existing["displayName"] = display_name
+            continue
+
+        groups[group_key] = {
+            "groupKey": group_key,
+            "displayName": display_name,
+            "inverterIds": [serial_number],
+        }
+
+    return sorted(
+        (
+            {
+                **group,
+                "inverterIds": sorted(set(group["inverterIds"])),
+            }
+            for group in groups.values()
+        ),
+        key=lambda group: (group["displayName"].lower(), group["groupKey"]),
+    )
+
+
+def _find_user_group_by_key(user_key):
+    inverters = watchpower_service.inverters if watchpower_service else []
+    groups = _group_inverters_by_user(inverters)
+    return next((group for group in groups if group["groupKey"] == user_key), None)
+
+
+def _build_status_payload(serial_number, response_payload):
+    telemetry_health = (
+        response_payload.get("telemetry_health") if response_payload else None
+    )
+    if telemetry_health:
+        return {
+            "serialNumber": serial_number,
+            "health": {
+                "state": (
+                    "healthy"
+                    if telemetry_health.get("state") == "online"
+                    else "offline"
+                ),
+                "reason": telemetry_health.get("reason")
+                or (
+                    "Telemetry is current."
+                    if telemetry_health.get("state") == "online"
+                    else "This inverter is not connected to the internet. No recent inverter data is available."
+                ),
+                "isUsable": telemetry_health.get("state") == "online",
+                "staleMinutes": telemetry_health.get("stale_minutes"),
+                "batteryFault": {
+                    "active": False,
+                    "reason": None,
+                },
+            },
+            "telemetryHealth": telemetry_health,
+        }
+
+    offline_health = _build_telemetry_health_from_timestamp(parsed_timestamp=None)
+    return {
+        "serialNumber": serial_number,
+        "health": {
+            "state": "offline",
+            "reason": offline_health["reason"],
+            "isUsable": False,
+            "staleMinutes": offline_health["stale_minutes"],
+            "batteryFault": {
+                "active": False,
+                "reason": None,
+            },
+        },
+        "telemetryHealth": offline_health,
+    }
 
 
 def _coerce_float(value):
@@ -422,6 +566,72 @@ def get_inverter_config(serial_number):
         return jsonify({"success": True, "inverter": inverter})
     except Exception as e:
         logger.error(f"Error fetching inverter config: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dashboard/user/<user_key>/bootstrap", methods=["GET"])
+def get_user_dashboard_bootstrap(user_key):
+    """Return initial overview data for a grouped user dashboard."""
+    try:
+        if not watchpower_service:
+            return jsonify({"error": "Service not initialized"}), 503
+
+        target_group = _find_user_group_by_key(user_key)
+        if not target_group or not target_group["inverterIds"]:
+            return (
+                jsonify(
+                    {
+                        "error": "Dashboard user not found",
+                        "user_key": user_key,
+                    }
+                ),
+                404,
+            )
+
+        inverter_config_by_id = {
+            str(inverter.get("serial_number") or "").strip(): inverter
+            for inverter in watchpower_service.inverters
+            if str(inverter.get("serial_number") or "").strip()
+        }
+
+        api_by_id = {}
+        daily_by_id = {}
+        status_by_id = {}
+
+        for serial_number in target_group["inverterIds"]:
+            inverter_config = inverter_config_by_id.get(serial_number)
+            response_payload = _build_inverter_response(
+                serial_number=serial_number,
+                inverter_config=inverter_config,
+            )
+            api_by_id[serial_number] = response_payload
+            daily_payload = watchpower_service.get_daily_raw(serial_number)
+            daily_by_id[serial_number] = (
+                {"success": True, **daily_payload} if daily_payload else None
+            )
+            status_by_id[serial_number] = _build_status_payload(
+                serial_number,
+                response_payload,
+            )
+
+        return jsonify(
+            {
+                "success": True,
+                "user": {
+                    "key": target_group["groupKey"],
+                    "displayName": target_group["displayName"],
+                    "inverterIds": target_group["inverterIds"],
+                },
+                "overview": {
+                    "apiById": api_by_id,
+                    "dailyById": daily_by_id,
+                    "statusById": status_by_id,
+                    "generatedAt": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error fetching dashboard bootstrap for {user_key}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -618,56 +828,64 @@ def get_inverter_history(serial_number):
 
 @app.route("/api/inverter/<serial_number>/energy-summary", methods=["GET"])
 def get_inverter_energy_summary(serial_number):
-    """Get server-side energy summaries for a specific inverter."""
+    """Get raw Neon timeline samples for Totals calculations."""
     try:
-        samples = []
-        since = datetime.now(timezone.utc) - timedelta(days=400)
-        if neon_store and neon_store.enabled:
-            try:
-                samples = neon_store.fetch_energy_summary_samples(
-                    serial_number=serial_number,
-                    since=since,
-                )
-            except Exception as e:
-                logger.error(
-                    "Failed to read energy summary samples from Neon for %s: %s. Falling back to CSV.",
-                    serial_number,
-                    e,
-                )
+        if not neon_store or not neon_store.enabled:
+            return jsonify({"error": "Neon store is not initialized"}), 503
 
-        if not samples:
-            if not csv_writer:
-                return jsonify({"error": "CSV writer not initialized"}), 503
+        from_timestamp = _parse_required_utc_timestamp_arg("from")
+        to_timestamp = _parse_required_utc_timestamp_arg("to")
+        if from_timestamp > to_timestamp:
+            return jsonify({"error": "'from' must be less than or equal to 'to'"}), 400
 
-            rows = csv_writer.get_all_data(serial_number)
-            samples = []
-            for row in rows:
-                parsed_timestamp = parse_watchpower_timestamp(
-                    row.get("Data E Hora"), WATCHPOWER_TIMEZONE
-                )
-                if parsed_timestamp is None:
-                    continue
-                samples.append(
-                    {
-                        "reading_at": parsed_timestamp,
-                        "load_power_w": row.get("AC Output Active Power"),
-                        "pv_power_w": (
-                            _coerce_float(
-                                row.get("PV1 Charging Power")
-                                or row.get("PV1 Charging power")
-                            )
-                            + _coerce_float(
-                                row.get("PV2 Charging Power")
-                                or row.get("PV2 Charging power")
-                            )
-                        ),
-                        "grid_power_w": 0,
-                        "raw_payload": row,
-                    }
-                )
+        samples = neon_store.fetch_energy_summary_samples(
+            serial_number=serial_number,
+            since=from_timestamp,
+            until=to_timestamp,
+        )
+        logger.info(
+            "Energy summary sample lookup for %s returned %s rows from %s to %s",
+            serial_number,
+            len(samples),
+            from_timestamp.isoformat(),
+            to_timestamp.isoformat(),
+        )
 
-        summary = build_energy_summary(serial_number, samples)
-        return jsonify({"success": True, "data": summary})
+        normalized_samples = []
+        for sample in samples:
+            reading_at = sample.get("reading_at")
+            normalized_samples.append(
+                {
+                    "readingAt": (
+                        reading_at.isoformat()
+                        if isinstance(reading_at, datetime)
+                        else None
+                    ),
+                    "loadPowerW": sample.get("load_power_w"),
+                    "pvPowerW": sample.get("pv_power_w"),
+                    "gridPowerW": sample.get("grid_power_w"),
+                    "rawPayload": sample.get("raw_payload"),
+                }
+            )
+
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "inverterId": serial_number,
+                    "generatedAt": datetime.now(timezone.utc).isoformat(),
+                    "from": from_timestamp.isoformat(),
+                    "to": to_timestamp.isoformat(),
+                    "samples": normalized_samples,
+                },
+                "hasHistory": len(normalized_samples) > 0,
+                "sampleCount": len(normalized_samples),
+                "sourceUsed": "neon" if normalized_samples else "none",
+                "warning": None,
+            }
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error fetching energy summary for {serial_number}: {e}")
         return jsonify({"error": str(e)}), 500

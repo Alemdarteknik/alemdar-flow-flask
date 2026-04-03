@@ -30,12 +30,16 @@ class StubNeonStore:
         self._latest = latest
         self.fetch_latest_calls = 0
         self.summary_samples = []
+        self.summary_calls = []
 
     def fetch_latest_reading(self, serial_number):
         self.fetch_latest_calls += 1
         return self._latest
 
-    def fetch_energy_summary_samples(self, serial_number, since=None):
+    def fetch_energy_summary_samples(self, serial_number, since=None, until=None):
+        self.summary_calls.append(
+            {"serial_number": serial_number, "since": since, "until": until}
+        )
         return list(self.summary_samples)
 
 
@@ -300,13 +304,38 @@ class AppReadPathTests(unittest.TestCase):
         flask_app_module.csv_writer = StubCsvWriter()
         flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
 
-        response = self.client.get(f"/api/inverter/{serial_number}/energy-summary")
+        response = self.client.get(
+            f"/api/inverter/{serial_number}/energy-summary",
+            query_string={
+                "from": "2026-03-01T00:00:00+00:00",
+                "to": "2026-03-31T23:59:59+00:00",
+            },
+        )
         payload = response.get_json()
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["success"])
         self.assertEqual(payload["data"]["inverterId"], serial_number)
-        self.assertEqual(len(payload["data"]["daily30d"]), 30)
+        self.assertEqual(payload["sampleCount"], 2)
+        self.assertEqual(payload["sourceUsed"], "neon")
+        self.assertEqual(len(payload["data"]["samples"]), 2)
+        self.assertEqual(
+            payload["data"]["samples"][0]["readingAt"], "2026-03-19T09:00:00+00:00"
+        )
+        self.assertEqual(neon_store.summary_calls[0]["serial_number"], serial_number)
+
+    def test_energy_summary_endpoint_requires_timeframe(self):
+        serial_number = "INV-001"
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = StubNeonStore(latest=None)
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+
+        response = self.client.get(f"/api/inverter/{serial_number}/energy-summary")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"], "Missing required query parameter: from")
 
 if __name__ == "__main__":
     unittest.main()
