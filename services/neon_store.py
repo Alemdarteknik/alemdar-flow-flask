@@ -452,6 +452,7 @@ class NeonStore:
         self,
         serial_number: str,
         since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
@@ -461,12 +462,13 @@ class NeonStore:
             FROM public.inverter_readings
             WHERE serial_number = %s
               AND (%s IS NULL OR reading_at >= %s)
+              AND (%s IS NULL OR reading_at <= %s)
             ORDER BY reading_at ASC
         """
 
         with self.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (serial_number, since, since))
+                cur.execute(sql, (serial_number, since, since, until, until))
                 rows = cur.fetchall()
 
         return [dict(row) for row in rows]
