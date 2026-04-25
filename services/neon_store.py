@@ -7,12 +7,13 @@ import json
 import logging
 import threading
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
+
 try:
     from psycopg_pool import ConnectionPool
 except ImportError:  # pragma: no cover - fallback for environments without pool package
@@ -87,7 +88,9 @@ class NeonStore:
             logger.warning("Failed to parse timestamp '%s', using now()", raw_timestamp)
         return datetime.now(timezone.utc)
 
-    def _source_hash(self, serial_number: str, reading_at: datetime, raw_data: Dict[str, Any]) -> str:
+    def _source_hash(
+        self, serial_number: str, reading_at: datetime, raw_data: Dict[str, Any]
+    ) -> str:
         canonical = {
             "serial_number": serial_number,
             "reading_at": reading_at.isoformat(),
@@ -103,7 +106,9 @@ class NeonStore:
 
         battery_voltage = _first_number(raw_data, ["Battery Voltage"])
         battery_charge_current = _first_number(raw_data, ["Battery Charging Current"])
-        battery_discharge_current = _first_number(raw_data, ["Battery Discharge Current"])
+        battery_discharge_current = _first_number(
+            raw_data, ["Battery Discharge Current"]
+        )
         battery_power = battery_voltage * (
             battery_charge_current + battery_discharge_current
         )
@@ -171,7 +176,9 @@ class NeonStore:
             "device_address": inverter_config.get("device_address"),
         }
 
-        with (nullcontext(conn) if conn is not None else self.connection()) as active_conn:
+        with (
+            nullcontext(conn) if conn is not None else self.connection()
+        ) as active_conn:
             with active_conn.cursor() as cur:
                 cur.execute(sql, params)
             if conn is None:
@@ -213,7 +220,9 @@ class NeonStore:
 
         with self.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT to_regclass('public.inverter_readings') AS table_name")
+                cur.execute(
+                    "SELECT to_regclass('public.inverter_readings') AS table_name"
+                )
                 row = cur.fetchone() or {}
                 if not row.get("table_name"):
                     return
@@ -287,7 +296,9 @@ class NeonStore:
             "source_row_hash": row_hash,
         }
 
-        with (nullcontext(conn) if conn is not None else self.connection()) as active_conn:
+        with (
+            nullcontext(conn) if conn is not None else self.connection()
+        ) as active_conn:
             with active_conn.cursor() as cur:
                 cur.execute(sql, params)
                 inserted = cur.rowcount > 0
@@ -319,7 +330,9 @@ class NeonStore:
             VALUES (%s, %s, %s, %s, %s, 'scheduler')
         """
 
-        with (nullcontext(conn) if conn is not None else self.connection()) as active_conn:
+        with (
+            nullcontext(conn) if conn is not None else self.connection()
+        ) as active_conn:
             with active_conn.cursor() as cur:
                 cur.execute(
                     sql,
@@ -334,7 +347,9 @@ class NeonStore:
             if conn is None:
                 active_conn.commit()
 
-    def fetch_history(self, serial_number: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def fetch_history(
+        self, serial_number: str, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
 
@@ -472,3 +487,179 @@ class NeonStore:
                 rows = cur.fetchall()
 
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Daily history (date-bound) for dashboard charting
+    # ------------------------------------------------------------------
+
+    DAILY_TITLES: List[str] = [
+        "Data E Hora",
+        "PV1 Charging Power",
+        "PV2 Charging Power",
+        "AC Output Active Power",
+        "Battery Voltage",
+        "Battery Discharge Current",
+        "Battery Charging Current",
+    ]
+
+    def fetch_daily_payload(
+        self,
+        serial_number: str,
+        day: date,
+        timezone_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return WatchPower-compatible {titles, rows} for the given local day.
+
+        Day boundaries are interpreted in the store's configured timezone.
+        Returns None when the store is disabled or the DB has no rows for the
+        requested day. Never falls back to live API data.
+        """
+        if not self.enabled:
+            return None
+
+        tz = self._tz
+        if timezone_name:
+            try:
+                tz = ZoneInfo(timezone_name)
+            except Exception:
+                logger.warning(
+                    "Unknown dashboard timezone %r, falling back to %s",
+                    timezone_name,
+                    self.timezone_name,
+                )
+
+        start_local = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=tz)
+        end_local = start_local + timedelta(days=1)
+
+        sql = """
+            SELECT raw_payload, reading_at
+            FROM public.inverter_readings
+            WHERE serial_number = %s
+              AND reading_at >= %s
+              AND reading_at < %s
+            ORDER BY reading_at ASC
+        """
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    (serial_number, start_local, end_local),
+                )
+                rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        titles = list(self.DAILY_TITLES)
+        title_keys = titles[1:]  # skip timestamp slot
+        built_rows: List[List[Any]] = []
+
+        for row in rows:
+            payload = row.get("raw_payload")
+            reading_at = row.get("reading_at")
+
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+
+            if not isinstance(payload, dict):
+                payload = {}
+
+            timestamp_label = ""
+            if isinstance(reading_at, datetime):
+                local_reading = reading_at.astimezone(tz)
+                timestamp_label = local_reading.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(payload.get("Data E Hora"), str):
+                timestamp_label = payload["Data E Hora"]
+
+            row_values: List[Any] = [timestamp_label]
+            for key in title_keys:
+                value = payload.get(key)
+                if value is None:
+                    # Try a couple of common alternative spellings
+                    for alt in (key.lower(), key.replace(" ", "_")):
+                        if alt in payload and payload[alt] is not None:
+                            value = payload[alt]
+                            break
+                row_values.append(value if value is not None else 0)
+
+            built_rows.append(row_values)
+
+        return {
+            "titles": titles,
+            "rows": built_rows,
+            "date": day.isoformat(),
+            "row_count": len(built_rows),
+        }
+
+    def inspect_daily_payload_window(
+        self,
+        serial_number: str,
+        day: date,
+        timezone_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return DB-level diagnostics for a local-day history query window."""
+        tz = self._tz
+        resolved_timezone = self.timezone_name
+        if timezone_name:
+            try:
+                tz = ZoneInfo(timezone_name)
+                resolved_timezone = timezone_name
+            except Exception:
+                logger.warning(
+                    "Unknown dashboard timezone %r, falling back to %s",
+                    timezone_name,
+                    self.timezone_name,
+                )
+
+        start_local = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=tz)
+        end_local = start_local + timedelta(days=1)
+
+        diagnostics: Dict[str, Any] = {
+            "serial_number": serial_number,
+            "date": day.isoformat(),
+            "timezone": resolved_timezone,
+            "window_start": start_local.isoformat(),
+            "window_end": end_local.isoformat(),
+            "db_enabled": self.enabled,
+            "row_count": 0,
+            "first_reading_at": None,
+            "last_reading_at": None,
+        }
+
+        if not self.enabled:
+            return diagnostics
+
+        sql = """
+            SELECT
+                COUNT(*) AS row_count,
+                MIN(reading_at) AS first_reading_at,
+                MAX(reading_at) AS last_reading_at
+            FROM public.inverter_readings
+            WHERE serial_number = %s
+              AND reading_at >= %s
+              AND reading_at < %s
+        """
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (serial_number, start_local, end_local))
+                row = cur.fetchone() or {}
+
+        row_count = row.get("row_count") if isinstance(row, dict) else None
+        diagnostics["row_count"] = int(row_count or 0)
+
+        first_reading_at = (
+            row.get("first_reading_at") if isinstance(row, dict) else None
+        )
+        if isinstance(first_reading_at, datetime):
+            diagnostics["first_reading_at"] = first_reading_at.isoformat()
+
+        last_reading_at = row.get("last_reading_at") if isinstance(row, dict) else None
+        if isinstance(last_reading_at, datetime):
+            diagnostics["last_reading_at"] = last_reading_at.isoformat()
+
+        return diagnostics

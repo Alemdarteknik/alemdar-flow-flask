@@ -31,6 +31,10 @@ class StubNeonStore:
         self.fetch_latest_calls = 0
         self.summary_samples = []
         self.summary_calls = []
+        self.daily_payload = None
+        self.daily_payload_by_serial = {}
+        self.daily_calls = []
+        self.daily_diagnostics = {}
 
     def fetch_latest_reading(self, serial_number):
         self.fetch_latest_calls += 1
@@ -42,12 +46,45 @@ class StubNeonStore:
         )
         return list(self.summary_samples)
 
+    def fetch_daily_payload(self, serial_number, day, timezone_name=None):
+        self.daily_calls.append(
+            {
+                "serial_number": serial_number,
+                "day": day,
+                "timezone_name": timezone_name,
+            }
+        )
+        if serial_number in self.daily_payload_by_serial:
+            return self.daily_payload_by_serial[serial_number]
+        return self.daily_payload
+
+    def inspect_daily_payload_window(self, serial_number, day, timezone_name=None):
+        default_payload = {
+            "serial_number": serial_number,
+            "date": day.isoformat(),
+            "timezone": timezone_name,
+            "window_start": f"{day.isoformat()}T00:00:00+00:00",
+            "window_end": f"{day.isoformat()}T23:59:59+00:00",
+            "row_count": 0,
+            "first_reading_at": None,
+            "last_reading_at": None,
+        }
+        return {
+            **default_payload,
+            **self.daily_diagnostics.get(serial_number, {}),
+        }
+
 
 class StubCsvWriter:
     def __init__(self, latest=None):
         self._latest = latest
 
-    def read_freshest(self, serial_number, timestamp_field="Data E Hora", timezone_name="Europe/Nicosia"):
+    def read_freshest(
+        self,
+        serial_number,
+        timestamp_field="Data E Hora",
+        timezone_name="Europe/Nicosia",
+    ):
         return self._latest
 
     def get_all_data(self, serial_number):
@@ -123,7 +160,9 @@ class AppReadPathTests(unittest.TestCase):
 
         self.assertEqual(first_payload["data"]["Data E Hora"], "2026-03-19 11:10:00")
         self.assertEqual(first_payload["data_source"], "cache")
-        self.assertEqual(first_payload["latest_reading_at"], "2026-03-19T09:10:00+00:00")
+        self.assertEqual(
+            first_payload["latest_reading_at"], "2026-03-19T09:10:00+00:00"
+        )
         self.assertEqual(first_payload["cached_at"], "2026-03-19T09:10:30+00:00")
         self.assertEqual(first_payload["status_source"], "persisted")
         self.assertEqual(second_payload["data"]["Data E Hora"], "2026-03-19 11:10:00")
@@ -198,12 +237,17 @@ class AppReadPathTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status_source"], "live_snapshot")
-        self.assertEqual(payload["live_telemetry_timestamp"], "2026-03-19T09:50:00+00:00")
+        self.assertEqual(
+            payload["live_telemetry_timestamp"], "2026-03-19T09:50:00+00:00"
+        )
         self.assertEqual(
             payload["persisted_telemetry_timestamp"], "2026-03-19T09:45:00+00:00"
         )
         self.assertEqual(payload["persistence_lag_minutes"], 5)
-        self.assertEqual(payload["telemetry_health"]["telemetry_timestamp"], "2026-03-19T09:50:00+00:00")
+        self.assertEqual(
+            payload["telemetry_health"]["telemetry_timestamp"],
+            "2026-03-19T09:50:00+00:00",
+        )
 
     def test_bulk_status_endpoint_returns_all_configured_inverters(self):
         now = datetime.now(timezone.utc)
@@ -249,7 +293,10 @@ class AppReadPathTests(unittest.TestCase):
             ["INV-001", "INV-002"],
         )
         self.assertTrue(
-            all(entry["status_source"] == "live_snapshot" for entry in payload["inverters"])
+            all(
+                entry["status_source"] == "live_snapshot"
+                for entry in payload["inverters"]
+            )
         )
 
     def test_build_telemetry_health_obeys_staleness_threshold_boundaries(self):
@@ -336,6 +383,259 @@ class AppReadPathTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(payload["error"], "Missing required query parameter: from")
+
+    def test_dashboard_bootstrap_uses_requested_timezone_for_daily_history(self):
+        serial_number = "INV-001"
+        persisted = {
+            "data": {
+                "Data E Hora": "2026-04-19 11:15:00",
+                "Load Status": "Load on",
+            },
+            "reading_at": datetime(2026, 4, 19, 9, 15, tzinfo=timezone.utc),
+            "polled_at": datetime(2026, 4, 19, 9, 16, tzinfo=timezone.utc),
+        }
+        neon_store = StubNeonStore(persisted)
+        neon_store.daily_payload = {
+            "titles": ["Data E Hora", "PV1 Charging Power"],
+            "rows": [["2026-04-18 00:30:00", "800"]],
+            "date": "2026-04-18",
+            "row_count": 1,
+        }
+
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = neon_store
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+        flask_app_module.watchpower_service.inverters = [
+            {
+                "serial_number": serial_number,
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            }
+        ]
+
+        response = self.client.get(
+            "/api/dashboard/user/demo-user/bootstrap",
+            query_string={
+                "date": "2026-04-18",
+                "timezone": "America/Los_Angeles",
+            },
+        )
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["overview"]["date"], "2026-04-18")
+        self.assertEqual(payload["overview"]["timezone"], "America/Los_Angeles")
+        self.assertEqual(len(neon_store.daily_calls), 1)
+        self.assertEqual(neon_store.daily_calls[0]["serial_number"], serial_number)
+        self.assertEqual(neon_store.daily_calls[0]["day"].isoformat(), "2026-04-18")
+        self.assertEqual(
+            neon_store.daily_calls[0]["timezone_name"],
+            "America/Los_Angeles",
+        )
+
+    def test_dashboard_chart_history_requires_date(self):
+        serial_number = "INV-001"
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = StubNeonStore(latest=None)
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+        flask_app_module.watchpower_service.inverters = [
+            {
+                "serial_number": serial_number,
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            }
+        ]
+
+        response = self.client.get("/api/dashboard/user/demo-user/chart-history")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"], "Missing required query parameter: date")
+
+    def test_dashboard_chart_history_uses_requested_timezone_for_daily_history(self):
+        serial_number = "INV-001"
+        neon_store = StubNeonStore(latest=None)
+        neon_store.daily_payload = {
+            "titles": ["Data E Hora", "PV1 Charging Power"],
+            "rows": [["2026-04-18 00:30:00", "800"]],
+            "date": "2026-04-18",
+            "row_count": 1,
+        }
+
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = neon_store
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+        flask_app_module.watchpower_service.inverters = [
+            {
+                "serial_number": serial_number,
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            }
+        ]
+
+        response = self.client.get(
+            "/api/dashboard/user/demo-user/chart-history",
+            query_string={
+                "date": "2026-04-18",
+                "timezone": "America/Los_Angeles",
+            },
+        )
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["history"]["date"], "2026-04-18")
+        self.assertEqual(payload["history"]["timezone"], "America/Los_Angeles")
+        self.assertNotIn("overview", payload)
+        self.assertEqual(len(neon_store.daily_calls), 1)
+        self.assertEqual(neon_store.daily_calls[0]["serial_number"], serial_number)
+        self.assertEqual(neon_store.daily_calls[0]["day"].isoformat(), "2026-04-18")
+        self.assertEqual(
+            neon_store.daily_calls[0]["timezone_name"],
+            "America/Los_Angeles",
+        )
+
+    def test_dashboard_chart_history_rejects_out_of_range_dates(self):
+        serial_number = "INV-001"
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = StubNeonStore(latest=None)
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+        flask_app_module.watchpower_service.inverters = [
+            {
+                "serial_number": serial_number,
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            }
+        ]
+
+        future_response = self.client.get(
+            "/api/dashboard/user/demo-user/chart-history",
+            query_string={"date": "3026-04-18"},
+        )
+        past_response = self.client.get(
+            "/api/dashboard/user/demo-user/chart-history",
+            query_string={"date": "2020-04-18"},
+        )
+
+        self.assertEqual(future_response.status_code, 400)
+        self.assertEqual(past_response.status_code, 400)
+        self.assertIn("Date out of range", future_response.get_json()["error"])
+        self.assertIn("Date out of range", past_response.get_json()["error"])
+
+    def test_dashboard_chart_history_falls_back_on_invalid_timezone(self):
+        serial_number = "INV-001"
+        neon_store = StubNeonStore(latest=None)
+        neon_store.daily_payload = {
+            "titles": ["Data E Hora", "PV1 Charging Power"],
+            "rows": [["2026-04-18 00:30:00", "800"]],
+            "date": "2026-04-18",
+            "row_count": 1,
+        }
+
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = neon_store
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+        flask_app_module.watchpower_service.inverters = [
+            {
+                "serial_number": serial_number,
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            }
+        ]
+
+        response = self.client.get(
+            "/api/dashboard/user/demo-user/chart-history",
+            query_string={
+                "date": "2026-04-18",
+                "timezone": "Mars/Olympus",
+            },
+        )
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            payload["history"]["timezone"], flask_app_module.WATCHPOWER_TIMEZONE
+        )
+        self.assertEqual(
+            neon_store.daily_calls[0]["timezone_name"],
+            flask_app_module.WATCHPOWER_TIMEZONE,
+        )
+
+    def test_dashboard_chart_history_returns_mixed_daily_availability(self):
+        serial_numbers = ["INV-001", "INV-002"]
+        neon_store = StubNeonStore(latest=None)
+        neon_store.daily_payload_by_serial = {
+            "INV-001": {
+                "titles": ["Data E Hora", "PV1 Charging Power"],
+                "rows": [["2026-04-18 00:30:00", "800"]],
+                "date": "2026-04-18",
+                "row_count": 1,
+            },
+            "INV-002": None,
+        }
+        neon_store.daily_diagnostics = {
+            "INV-001": {
+                "row_count": 1,
+                "first_reading_at": "2026-04-18T00:30:00+00:00",
+                "last_reading_at": "2026-04-18T00:30:00+00:00",
+            },
+            "INV-002": {
+                "row_count": 0,
+            },
+        }
+
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = neon_store
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_numbers)
+        flask_app_module.watchpower_service.inverters = [
+            {
+                "serial_number": "INV-001",
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            },
+            {
+                "serial_number": "INV-002",
+                "alias": "Demo User",
+                "description": "Demo User",
+                "system_type": "Hybrid",
+            },
+        ]
+
+        response = self.client.get(
+            "/api/dashboard/user/demo-user/chart-history",
+            query_string={"date": "2026-04-18"},
+        )
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(payload["history"]["dailyById"]["INV-001"])
+        self.assertIsNone(payload["history"]["dailyById"]["INV-002"])
+        self.assertEqual(
+            payload["history"]["diagnosticsById"]["INV-001"]["rowCount"], 1
+        )
+        self.assertTrue(payload["history"]["diagnosticsById"]["INV-001"]["hasPayload"])
+        self.assertEqual(
+            payload["history"]["diagnosticsById"]["INV-002"]["rowCount"], 0
+        )
+        self.assertFalse(payload["history"]["diagnosticsById"]["INV-002"]["hasPayload"])
+        self.assertEqual(
+            payload["history"]["dailyErrorsById"]["INV-002"],
+            "No telemetry recorded for 2026-04-18.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
