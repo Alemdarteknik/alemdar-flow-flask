@@ -8,7 +8,8 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -159,9 +160,7 @@ def _resolve_status_timestamp(latest, scheduler_state):
     live_telemetry_at = _parse_optional_timestamp(
         scheduler_state.get("last_live_telemetry_at")
     )
-    live_grace_seconds = (
-        scheduler.live_snapshot_grace_seconds if scheduler else 120
-    )
+    live_grace_seconds = scheduler.live_snapshot_grace_seconds if scheduler else 120
     live_is_recent = (
         live_checked_at is not None
         and int((now_utc - live_checked_at).total_seconds()) <= live_grace_seconds
@@ -196,7 +195,9 @@ def _build_inverter_response(serial_number, inverter_config):
     )
     scheduler_state = scheduler.get_inverter_state(serial_number) if scheduler else {}
     scheduler_state = scheduler_state or {}
-    resolved_status = _resolve_status_timestamp(latest=latest, scheduler_state=scheduler_state)
+    resolved_status = _resolve_status_timestamp(
+        latest=latest, scheduler_state=scheduler_state
+    )
 
     latest_data = latest.get("data") if latest else None
     status_timestamp = resolved_status["status_timestamp"]
@@ -230,7 +231,9 @@ def _build_inverter_response(serial_number, inverter_config):
         ),
         "cached_at": cached_at,
         "last_poll": (
-            scheduler.last_poll_time.isoformat() if scheduler and scheduler.last_poll_time else None
+            scheduler.last_poll_time.isoformat()
+            if scheduler and scheduler.last_poll_time
+            else None
         ),
         "latest_reading_at": (
             latest_reading_at.isoformat() if latest_reading_at else None
@@ -257,6 +260,7 @@ def _build_inverter_response(serial_number, inverter_config):
         "inverter_config": (latest.get("inverter_config") if latest else None)
         or inverter_config,
     }
+
 
 def _load_inverters_config():
     """Load inverter configs from disk"""
@@ -447,9 +451,7 @@ def init_services():
         poll_retry_backoff_seconds=poll_retry_backoff_seconds,
         tick_seconds=int(os.getenv("POLL_TICK_SECONDS", 15)),
         timezone_name=WATCHPOWER_TIMEZONE,
-        live_status_refresh_seconds=int(
-            os.getenv("LIVE_STATUS_REFRESH_SECONDS", 60)
-        ),
+        live_status_refresh_seconds=int(os.getenv("LIVE_STATUS_REFRESH_SECONDS", 60)),
     )
 
     if neon_store.enabled:
@@ -569,9 +571,179 @@ def get_inverter_config(serial_number):
         return jsonify({"error": str(e)}), 500
 
 
+DASHBOARD_HISTORY_MAX_DAYS = 30
+
+
+def _resolve_dashboard_history_request(raw_date=None, require_date=False):
+    request_timezone = request.args.get("timezone", WATCHPOWER_TIMEZONE).strip()
+    try:
+        dashboard_tz = ZoneInfo(request_timezone)
+    except Exception:
+        logger.warning(
+            "Invalid dashboard timezone %r, falling back to %s",
+            request_timezone,
+            WATCHPOWER_TIMEZONE,
+        )
+        dashboard_tz = ZoneInfo(WATCHPOWER_TIMEZONE)
+        request_timezone = WATCHPOWER_TIMEZONE
+
+    today = datetime.now(dashboard_tz).date()
+    min_day = today - timedelta(days=DASHBOARD_HISTORY_MAX_DAYS)
+    normalized_raw_date = raw_date if raw_date is not None else request.args.get("date")
+    target_day = None
+
+    if normalized_raw_date:
+        try:
+            target_day = datetime.strptime(
+                normalized_raw_date.strip(), "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            return None, (
+                jsonify(
+                    {
+                        "error": "Invalid date format. Expected YYYY-MM-DD.",
+                        "date": normalized_raw_date,
+                    }
+                ),
+                400,
+            )
+
+        if target_day > today or target_day < min_day:
+            return None, (
+                jsonify(
+                    {
+                        "error": (
+                            "Date out of range. Must be within the last "
+                            f"{DASHBOARD_HISTORY_MAX_DAYS} days."
+                        ),
+                        "date": normalized_raw_date,
+                    }
+                ),
+                400,
+            )
+    elif require_date:
+        return None, (
+            jsonify({"error": "Missing required query parameter: date"}),
+            400,
+        )
+
+    return {
+        "request_timezone": request_timezone,
+        "today": today,
+        "effective_day": target_day or today,
+    }, None
+
+
+def _build_grouped_daily_history(target_group, effective_day, request_timezone):
+    inverter_config_by_id = {
+        str(inverter.get("serial_number") or "").strip(): inverter
+        for inverter in watchpower_service.inverters
+        if str(inverter.get("serial_number") or "").strip()
+    }
+
+    daily_by_id = {}
+    daily_errors_by_id = {}
+    diagnostics_by_id = {}
+
+    for serial_number in target_group["inverterIds"]:
+        inverter_config = inverter_config_by_id.get(serial_number)
+        diagnostic_payload = {
+            "serialNumber": serial_number,
+            "date": effective_day.isoformat(),
+            "timezone": request_timezone,
+            "dbEnabled": bool(neon_store and neon_store.enabled),
+            "rowCount": None,
+            "windowStart": None,
+            "windowEnd": None,
+            "firstReadingAt": None,
+            "lastReadingAt": None,
+            "payloadRowCount": 0,
+            "hasPayload": False,
+            "error": None,
+        }
+
+        try:
+            if neon_store and hasattr(neon_store, "inspect_daily_payload_window"):
+                inspected = neon_store.inspect_daily_payload_window(
+                    serial_number=serial_number,
+                    day=effective_day,
+                    timezone_name=request_timezone,
+                )
+                diagnostic_payload.update(
+                    {
+                        "rowCount": inspected.get("row_count"),
+                        "windowStart": inspected.get("window_start"),
+                        "windowEnd": inspected.get("window_end"),
+                        "firstReadingAt": inspected.get("first_reading_at"),
+                        "lastReadingAt": inspected.get("last_reading_at"),
+                    }
+                )
+
+            daily_payload = neon_store.fetch_daily_payload(
+                serial_number=serial_number,
+                day=effective_day,
+                timezone_name=request_timezone,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch daily payload for %s on %s: %s",
+                serial_number,
+                effective_day.isoformat(),
+                exc,
+            )
+            daily_payload = None
+            daily_errors_by_id[serial_number] = (
+                "Failed to load daily history from database."
+            )
+            diagnostic_payload["error"] = str(exc)
+
+        if daily_payload:
+            payload_row_count = len(daily_payload.get("rows") or [])
+            diagnostic_payload["payloadRowCount"] = payload_row_count
+            diagnostic_payload["hasPayload"] = payload_row_count > 0
+            daily_by_id[serial_number] = {
+                "success": True,
+                "serial_number": serial_number,
+                "alias": (inverter_config or {}).get("alias", serial_number),
+                "system_type": (inverter_config or {}).get("system_type", "unknown"),
+                **daily_payload,
+            }
+        else:
+            daily_by_id[serial_number] = None
+            if serial_number not in daily_errors_by_id:
+                daily_errors_by_id[serial_number] = (
+                    f"No telemetry recorded for {effective_day.isoformat()}."
+                )
+            diagnostic_payload["error"] = daily_errors_by_id[serial_number]
+
+        diagnostics_by_id[serial_number] = diagnostic_payload
+        logger.info(
+            "Daily history trace user=%s serial=%s date=%s timezone=%s db_rows=%s payload_rows=%s has_payload=%s error=%s",
+            target_group["groupKey"],
+            serial_number,
+            effective_day.isoformat(),
+            request_timezone,
+            diagnostic_payload["rowCount"],
+            diagnostic_payload["payloadRowCount"],
+            diagnostic_payload["hasPayload"],
+            diagnostic_payload["error"],
+        )
+
+    return {
+        "dailyById": daily_by_id,
+        "dailyErrorsById": daily_errors_by_id,
+        "diagnosticsById": diagnostics_by_id,
+    }
+
+
 @app.route("/api/dashboard/user/<user_key>/bootstrap", methods=["GET"])
 def get_user_dashboard_bootstrap(user_key):
-    """Return initial overview data for a grouped user dashboard."""
+    """Return initial overview data for a grouped user dashboard.
+
+    Optional query parameter:
+        date=YYYY-MM-DD - fetch daily payload for a specific past day
+        (within the last DASHBOARD_HISTORY_MAX_DAYS days).
+    """
     try:
         if not watchpower_service:
             return jsonify({"error": "Service not initialized"}), 503
@@ -588,6 +760,12 @@ def get_user_dashboard_bootstrap(user_key):
                 404,
             )
 
+        history_request, error_response = _resolve_dashboard_history_request()
+        if error_response:
+            return error_response
+        request_timezone = history_request["request_timezone"]
+        effective_day = history_request["effective_day"]
+
         inverter_config_by_id = {
             str(inverter.get("serial_number") or "").strip(): inverter
             for inverter in watchpower_service.inverters
@@ -596,7 +774,28 @@ def get_user_dashboard_bootstrap(user_key):
 
         api_by_id = {}
         daily_by_id = {}
+        daily_errors_by_id = {}
         status_by_id = {}
+
+        db_available = bool(neon_store and neon_store.enabled)
+        if not db_available:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "Historical data store is not configured. "
+                            "Set NEON_DATABASE_URL to enable daily charts."
+                        ),
+                    }
+                ),
+                503,
+            )
+
+        history_payload = _build_grouped_daily_history(
+            target_group=target_group,
+            effective_day=effective_day,
+            request_timezone=request_timezone,
+        )
 
         for serial_number in target_group["inverterIds"]:
             inverter_config = inverter_config_by_id.get(serial_number)
@@ -605,14 +804,14 @@ def get_user_dashboard_bootstrap(user_key):
                 inverter_config=inverter_config,
             )
             api_by_id[serial_number] = response_payload
-            daily_payload = watchpower_service.get_daily_raw(serial_number)
-            daily_by_id[serial_number] = (
-                {"success": True, **daily_payload} if daily_payload else None
-            )
+
             status_by_id[serial_number] = _build_status_payload(
                 serial_number,
                 response_payload,
             )
+
+        daily_by_id = history_payload["dailyById"]
+        daily_errors_by_id = history_payload["dailyErrorsById"]
 
         return jsonify(
             {
@@ -625,13 +824,88 @@ def get_user_dashboard_bootstrap(user_key):
                 "overview": {
                     "apiById": api_by_id,
                     "dailyById": daily_by_id,
+                    "dailyErrorsById": daily_errors_by_id,
+                    "diagnosticsById": history_payload["diagnosticsById"],
                     "statusById": status_by_id,
                     "generatedAt": datetime.now(timezone.utc).isoformat(),
+                    "date": effective_day.isoformat(),
+                    "timezone": request_timezone,
+                    "source": "neon",
                 },
             }
         )
     except Exception as e:
         logger.error(f"Error fetching dashboard bootstrap for {user_key}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dashboard/user/<user_key>/chart-history", methods=["GET"])
+def get_user_dashboard_chart_history(user_key):
+    try:
+        if not watchpower_service:
+            return jsonify({"error": "Service not initialized"}), 503
+
+        target_group = _find_user_group_by_key(user_key)
+        if not target_group or not target_group["inverterIds"]:
+            return (
+                jsonify(
+                    {
+                        "error": "Dashboard user not found",
+                        "user_key": user_key,
+                    }
+                ),
+                404,
+            )
+
+        db_available = bool(neon_store and neon_store.enabled)
+        if not db_available:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "Historical data store is not configured. "
+                            "Set NEON_DATABASE_URL to enable daily charts."
+                        ),
+                    }
+                ),
+                503,
+            )
+
+        history_request, error_response = _resolve_dashboard_history_request(
+            require_date=True
+        )
+        if error_response:
+            return error_response
+
+        request_timezone = history_request["request_timezone"]
+        effective_day = history_request["effective_day"]
+        history_payload = _build_grouped_daily_history(
+            target_group=target_group,
+            effective_day=effective_day,
+            request_timezone=request_timezone,
+        )
+
+        return jsonify(
+            {
+                "success": True,
+                "user": {
+                    "key": target_group["groupKey"],
+                    "displayName": target_group["displayName"],
+                    "inverterIds": target_group["inverterIds"],
+                },
+                "history": {
+                    "dailyById": history_payload["dailyById"],
+                    "dailyErrorsById": history_payload["dailyErrorsById"],
+                    "diagnosticsById": history_payload["diagnosticsById"],
+                    "generatedAt": datetime.now(timezone.utc).isoformat(),
+                    "date": effective_day.isoformat(),
+                    "timezone": request_timezone,
+                    "source": "neon",
+                },
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error fetching dashboard chart history for {user_key}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -778,7 +1052,6 @@ def get_inverter_data(serial_number):
         return jsonify({"error": str(e)}), 500
 
 
-
 @app.route("/api/inverter/<serial_number>/history", methods=["GET"])
 def get_inverter_history(serial_number):
     """Get historical data for a specific inverter from CSV"""
@@ -788,7 +1061,9 @@ def get_inverter_history(serial_number):
 
         if neon_store and neon_store.enabled:
             try:
-                data = neon_store.fetch_history(serial_number=serial_number, limit=limit)
+                data = neon_store.fetch_history(
+                    serial_number=serial_number, limit=limit
+                )
                 if data:
                     return jsonify(
                         {
