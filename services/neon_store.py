@@ -5,6 +5,7 @@ Neon persistence service for inverter metadata and readings.
 import hashlib
 import json
 import logging
+import os
 import threading
 from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
@@ -51,6 +52,20 @@ class NeonStore:
         self._pool = None
         self._pool_lock = threading.Lock()
 
+        # Per-process pool sizing. With multiple Gunicorn workers each worker
+        # gets its own pool, so total connections = workers * max_size. Keep
+        # this small to stay under the Neon plan limit. Override via env.
+        try:
+            self._pool_min_size = max(0, int(os.getenv("NEON_POOL_MIN_SIZE", "0")))
+        except ValueError:
+            self._pool_min_size = 0
+        try:
+            self._pool_max_size = max(1, int(os.getenv("NEON_POOL_MAX_SIZE", "2")))
+        except ValueError:
+            self._pool_max_size = 2
+        if self._pool_min_size > self._pool_max_size:
+            self._pool_min_size = self._pool_max_size
+
     def _get_pool(self):
         if not self.enabled or not self.database_url or ConnectionPool is None:
             return None
@@ -59,8 +74,8 @@ class NeonStore:
             if self._pool is None:
                 self._pool = ConnectionPool(
                     self.database_url,
-                    min_size=1,
-                    max_size=4,
+                    min_size=self._pool_min_size,
+                    max_size=self._pool_max_size,
                     kwargs={"row_factory": dict_row},
                 )
             return self._pool
@@ -462,6 +477,44 @@ class NeonStore:
             return None
 
         return self._normalize_reading_row(row)
+
+    def fetch_latest_readings_batch(
+        self, serial_numbers: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Bulk-fetch the latest reading for each serial in a single query.
+
+        Returns a dict keyed by serial_number. Serials with no rows are absent.
+        Use this instead of calling fetch_latest_reading() in a loop to avoid
+        N+1 round-trips against Neon.
+        """
+        if not self.enabled:
+            return {}
+
+        unique_serials = [s for s in {str(sn).strip() for sn in serial_numbers} if s]
+        if not unique_serials:
+            return {}
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (serial_number)
+                           serial_number, raw_payload, reading_at, polled_at
+                    FROM public.inverter_readings
+                    WHERE serial_number = ANY(%s)
+                    ORDER BY serial_number, reading_at DESC
+                    """,
+                    (unique_serials,),
+                )
+                rows = cur.fetchall() or []
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            serial = row.get("serial_number")
+            if not serial:
+                continue
+            result[str(serial)] = self._normalize_reading_row(row)
+        return result
 
     def fetch_energy_summary_samples(
         self,

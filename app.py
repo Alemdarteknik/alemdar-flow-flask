@@ -184,6 +184,93 @@ def _resolve_status_timestamp(latest, scheduler_state):
     }
 
 
+def _build_inverter_response_cache_only(serial_number, inverter_config):
+    """Cheap, DB-free response builder used by the /api/inverters/status hot path.
+
+    Reads only from the in-memory scheduler cache + scheduler state. Returns
+    None if the inverter has never been polled. Never touches Neon or CSV,
+    so a polling fanout from many clients cannot create DB pressure.
+    """
+    cache_entry = scheduler.get_cached_data(serial_number) if scheduler else None
+    scheduler_state = (
+        scheduler.get_inverter_state(serial_number) if scheduler else {}
+    ) or {}
+
+    latest_data = None
+    cached_at = None
+    reading_at = None
+    if isinstance(cache_entry, dict):
+        raw = cache_entry.get("data")
+        if isinstance(raw, dict):
+            latest_data = raw
+        cached_at = cache_entry.get("timestamp") or cache_entry.get("polled_at")
+        reading_at = cache_entry.get("reading_at")
+        if not isinstance(reading_at, datetime):
+            reading_at = parse_watchpower_timestamp(
+                raw.get("Data E Hora") if isinstance(raw, dict) else None,
+                WATCHPOWER_TIMEZONE,
+            )
+
+    resolved_status = _resolve_status_timestamp(
+        latest={"reading_at": reading_at} if reading_at else {},
+        scheduler_state=scheduler_state,
+    )
+    status_timestamp = resolved_status["status_timestamp"]
+
+    if latest_data is None and status_timestamp is None:
+        return None
+
+    if not cached_at:
+        cached_at = (
+            scheduler_state.get("last_successful_poll_at")
+            or scheduler_state.get("last_polled_at")
+            or (
+                resolved_status["live_checked_at"].isoformat()
+                if resolved_status["live_checked_at"]
+                else None
+            )
+        )
+
+    live_telemetry_at = resolved_status["live_telemetry_at"]
+    persisted_telemetry_at = resolved_status["persisted_telemetry_at"]
+
+    return {
+        "success": True,
+        "serial_number": serial_number,
+        "data": latest_data,
+        "telemetry_health": _build_telemetry_health_from_timestamp(
+            parsed_timestamp=status_timestamp
+        ),
+        "cached_at": cached_at,
+        "last_poll": (
+            scheduler.last_poll_time.isoformat()
+            if scheduler and scheduler.last_poll_time
+            else None
+        ),
+        "latest_reading_at": reading_at.isoformat() if reading_at else None,
+        "last_successful_poll_at": scheduler_state.get("last_successful_poll_at"),
+        "next_poll_due_at": scheduler_state.get("next_poll_due_at"),
+        "status_source": resolved_status["status_source"],
+        "data_source": "cache",
+        "live_telemetry_timestamp": (
+            live_telemetry_at.isoformat() if live_telemetry_at else None
+        ),
+        "live_checked_at": (
+            resolved_status["live_checked_at"].isoformat()
+            if resolved_status["live_checked_at"]
+            else None
+        ),
+        "persisted_telemetry_timestamp": (
+            persisted_telemetry_at.isoformat() if persisted_telemetry_at else None
+        ),
+        "persistence_lag_minutes": _calculate_persistence_lag_minutes(
+            live_telemetry_at=live_telemetry_at,
+            persisted_telemetry_at=persisted_telemetry_at,
+        ),
+        "inverter_config": inverter_config,
+    }
+
+
 def _build_inverter_response(serial_number, inverter_config):
     latest = resolve_latest_reading(
         serial_number=serial_number,
@@ -471,7 +558,25 @@ def init_services():
                     e,
                 )
 
-    scheduler.start()
+    # Only start the background polling thread when explicitly enabled.
+    # When running multiple Gunicorn workers, the scheduler must run in
+    # exactly ONE process to avoid duplicated WatchPower polls and
+    # duplicated Neon writes. Recommended deployment: split into two
+    # Railway services - a `web` service with RUN_SCHEDULER=0 and a
+    # `scheduler` service with RUN_SCHEDULER=1 (single worker).
+    run_scheduler_raw = os.getenv("RUN_SCHEDULER", "1").strip().lower()
+    run_scheduler = run_scheduler_raw not in ("0", "false", "no", "off", "")
+    if run_scheduler:
+        scheduler.start()
+        logger.info(
+            "Polling scheduler started (RUN_SCHEDULER=%s)", run_scheduler_raw or "1"
+        )
+    else:
+        logger.info(
+            "Polling scheduler NOT started in this process (RUN_SCHEDULER=%s). "
+            "Cached telemetry will be empty until another process polls.",
+            run_scheduler_raw,
+        )
 
     logger.info("All services initialized successfully")
 
@@ -509,7 +614,13 @@ def get_inverters():
 
 @app.route("/api/inverters/status", methods=["GET"])
 def get_inverters_status():
-    """Get current status payloads for all configured inverters."""
+    """Get current status payloads for all configured inverters.
+
+    Hot path: served entirely from the in-memory scheduler cache. Does NOT
+    touch Neon or CSV per request. The polling scheduler is the single
+    source of truth for live status; if its cache is empty for a serial,
+    that inverter is reported as offline until the scheduler refreshes.
+    """
     try:
         if not watchpower_service or not scheduler:
             return jsonify({"error": "Service not initialized"}), 503
@@ -520,20 +631,27 @@ def get_inverters_status():
             if not serial_number:
                 continue
 
-            response_payload = _build_inverter_response(
+            response_payload = _build_inverter_response_cache_only(
                 serial_number=serial_number,
                 inverter_config=inverter,
             )
             if response_payload is not None:
                 payloads.append(response_payload)
 
-        return jsonify(
+        response = jsonify(
             {
                 "success": True,
                 "count": len(payloads),
                 "inverters": payloads,
             }
         )
+        # Allow Next.js route handler / browser to reuse this response for a
+        # short window. Multiple polling tabs collapse into one upstream
+        # Flask call within max-age.
+        response.headers["Cache-Control"] = (
+            "public, max-age=20, stale-while-revalidate=40"
+        )
+        return response
     except Exception as e:
         logger.error(f"Error fetching inverter status list: {e}")
         return jsonify({"error": str(e)}), 500
