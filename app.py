@@ -1361,10 +1361,25 @@ def internal_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 
+def _should_auto_init_services() -> bool:
+    raw = os.getenv("FLASK_AUTO_INIT_SERVICES", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
+
+
+if __name__ != "__main__" and _should_auto_init_services():
+    try:
+        init_services()
+    except Exception as e:
+        # Keep process alive so health endpoints can expose startup failure.
+        # API routes will continue returning 503 until init succeeds.
+        logger.error("Service auto-initialization failed: %s", e)
+
+
 if __name__ == "__main__":
     try:
         # Initialize all services
-        init_services()
+        if not watchpower_service or not scheduler:
+            init_services()
 
         # Get port from environment
         port = int(os.getenv("FLASK_PORT", 5000))
