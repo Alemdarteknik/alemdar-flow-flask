@@ -541,6 +541,33 @@ class NeonStore:
 
         return [dict(row) for row in rows]
 
+    def fetch_energy_summary_available_months(
+        self,
+        serial_number: str,
+    ) -> List[str]:
+        if not self.enabled:
+            return []
+
+        sql = """
+            SELECT DISTINCT TO_CHAR(DATE_TRUNC('month', reading_at), 'YYYY-MM') AS month_key
+            FROM public.inverter_readings
+            WHERE serial_number = %s
+            ORDER BY month_key DESC
+        """
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (serial_number,))
+                rows = cur.fetchall() or []
+
+        months: List[str] = []
+        for row in rows:
+            month_key = row.get("month_key") if isinstance(row, dict) else None
+            if isinstance(month_key, str) and month_key.strip():
+                months.append(month_key.strip())
+
+        return months
+
     # ------------------------------------------------------------------
     # Daily history (date-bound) for dashboard charting
     # ------------------------------------------------------------------
@@ -554,6 +581,59 @@ class NeonStore:
         "Battery Discharge Current",
         "Battery Charging Current",
     ]
+
+    def _build_daily_payload_from_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        day: date,
+        tz: ZoneInfo,
+    ) -> Optional[Dict[str, Any]]:
+        if not rows:
+            return None
+
+        titles = list(self.DAILY_TITLES)
+        title_keys = titles[1:]  # skip timestamp slot
+        built_rows: List[List[Any]] = []
+
+        for row in rows:
+            payload = row.get("raw_payload")
+            reading_at = row.get("reading_at")
+
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+
+            if not isinstance(payload, dict):
+                payload = {}
+
+            timestamp_label = ""
+            if isinstance(reading_at, datetime):
+                local_reading = reading_at.astimezone(tz)
+                timestamp_label = local_reading.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(payload.get("Data E Hora"), str):
+                timestamp_label = payload["Data E Hora"]
+
+            row_values: List[Any] = [timestamp_label]
+            for key in title_keys:
+                value = payload.get(key)
+                if value is None:
+                    # Try a couple of common alternative spellings
+                    for alt in (key.lower(), key.replace(" ", "_")):
+                        if alt in payload and payload[alt] is not None:
+                            value = payload[alt]
+                            break
+                row_values.append(value if value is not None else 0)
+
+            built_rows.append(row_values)
+
+        return {
+            "titles": titles,
+            "rows": built_rows,
+            "date": day.isoformat(),
+            "row_count": len(built_rows),
+        }
 
     def fetch_daily_payload(
         self,
@@ -601,51 +681,63 @@ class NeonStore:
                 )
                 rows = cur.fetchall()
 
-        if not rows:
-            return None
+        return self._build_daily_payload_from_rows(rows=rows, day=day, tz=tz)
 
-        titles = list(self.DAILY_TITLES)
-        title_keys = titles[1:]  # skip timestamp slot
-        built_rows: List[List[Any]] = []
+    def fetch_daily_payload_batch(
+        self,
+        serial_numbers: List[str],
+        day: date,
+        timezone_name: Optional[str] = None,
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Return {serial -> daily payload} for all requested serials using one query."""
+        if not self.enabled:
+            return {}
 
+        normalized_serials = sorted(
+            {str(serial).strip() for serial in serial_numbers if str(serial).strip()}
+        )
+        if not normalized_serials:
+            return {}
+
+        tz = self._tz
+        if timezone_name:
+            try:
+                tz = ZoneInfo(timezone_name)
+            except Exception:
+                logger.warning(
+                    "Unknown dashboard timezone %r, falling back to %s",
+                    timezone_name,
+                    self.timezone_name,
+                )
+
+        start_local = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=tz)
+        end_local = start_local + timedelta(days=1)
+
+        sql = """
+            SELECT serial_number, raw_payload, reading_at
+            FROM public.inverter_readings
+            WHERE serial_number = ANY(%s)
+              AND reading_at >= %s
+              AND reading_at < %s
+            ORDER BY serial_number ASC, reading_at ASC
+        """
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (normalized_serials, start_local, end_local))
+                rows = cur.fetchall() or []
+
+        rows_by_serial: Dict[str, List[Dict[str, Any]]] = {
+            serial: [] for serial in normalized_serials
+        }
         for row in rows:
-            payload = row.get("raw_payload")
-            reading_at = row.get("reading_at")
-
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except json.JSONDecodeError:
-                    payload = None
-
-            if not isinstance(payload, dict):
-                payload = {}
-
-            timestamp_label = ""
-            if isinstance(reading_at, datetime):
-                local_reading = reading_at.astimezone(tz)
-                timestamp_label = local_reading.strftime("%Y-%m-%d %H:%M:%S")
-            elif isinstance(payload.get("Data E Hora"), str):
-                timestamp_label = payload["Data E Hora"]
-
-            row_values: List[Any] = [timestamp_label]
-            for key in title_keys:
-                value = payload.get(key)
-                if value is None:
-                    # Try a couple of common alternative spellings
-                    for alt in (key.lower(), key.replace(" ", "_")):
-                        if alt in payload and payload[alt] is not None:
-                            value = payload[alt]
-                            break
-                row_values.append(value if value is not None else 0)
-
-            built_rows.append(row_values)
+            serial_number = str(row.get("serial_number") or "").strip()
+            if serial_number and serial_number in rows_by_serial:
+                rows_by_serial[serial_number].append(row)
 
         return {
-            "titles": titles,
-            "rows": built_rows,
-            "date": day.isoformat(),
-            "row_count": len(built_rows),
+            serial: self._build_daily_payload_from_rows(serial_rows, day=day, tz=tz)
+            for serial, serial_rows in rows_by_serial.items()
         }
 
     def inspect_daily_payload_window(

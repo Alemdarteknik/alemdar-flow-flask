@@ -752,7 +752,12 @@ def _resolve_dashboard_history_request(raw_date=None, require_date=False):
     }, None
 
 
-def _build_grouped_daily_history(target_group, effective_day, request_timezone):
+def _build_grouped_daily_history(
+    target_group,
+    effective_day,
+    request_timezone,
+    include_diagnostics=False,
+):
     inverter_config_by_id = {
         str(inverter.get("serial_number") or "").strip(): inverter
         for inverter in watchpower_service.inverters
@@ -762,6 +767,26 @@ def _build_grouped_daily_history(target_group, effective_day, request_timezone):
     daily_by_id = {}
     daily_errors_by_id = {}
     diagnostics_by_id = {}
+
+    serial_numbers = list(target_group["inverterIds"])
+    daily_payload_by_id = {}
+    batch_fetch_available = False
+
+    try:
+        if neon_store and hasattr(neon_store, "fetch_daily_payload_batch"):
+            daily_payload_by_id = neon_store.fetch_daily_payload_batch(
+                serial_numbers=serial_numbers,
+                day=effective_day,
+                timezone_name=request_timezone,
+            )
+            batch_fetch_available = True
+    except Exception as exc:
+        logger.error(
+            "Failed to batch fetch daily payloads for user=%s date=%s: %s",
+            target_group["groupKey"],
+            effective_day.isoformat(),
+            exc,
+        )
 
     for serial_number in target_group["inverterIds"]:
         inverter_config = inverter_config_by_id.get(serial_number)
@@ -781,7 +806,11 @@ def _build_grouped_daily_history(target_group, effective_day, request_timezone):
         }
 
         try:
-            if neon_store and hasattr(neon_store, "inspect_daily_payload_window"):
+            if (
+                include_diagnostics
+                and neon_store
+                and hasattr(neon_store, "inspect_daily_payload_window")
+            ):
                 inspected = neon_store.inspect_daily_payload_window(
                     serial_number=serial_number,
                     day=effective_day,
@@ -796,12 +825,14 @@ def _build_grouped_daily_history(target_group, effective_day, request_timezone):
                         "lastReadingAt": inspected.get("last_reading_at"),
                     }
                 )
-
-            daily_payload = neon_store.fetch_daily_payload(
-                serial_number=serial_number,
-                day=effective_day,
-                timezone_name=request_timezone,
-            )
+            if batch_fetch_available:
+                daily_payload = daily_payload_by_id.get(serial_number)
+            else:
+                daily_payload = neon_store.fetch_daily_payload(
+                    serial_number=serial_number,
+                    day=effective_day,
+                    timezone_name=request_timezone,
+                )
         except Exception as exc:
             logger.error(
                 "Failed to fetch daily payload for %s on %s: %s",
@@ -913,6 +944,10 @@ def get_user_dashboard_bootstrap(user_key):
             target_group=target_group,
             effective_day=effective_day,
             request_timezone=request_timezone,
+            include_diagnostics=(
+                request.args.get("diagnostics", "").strip().lower()
+                in ("1", "true", "yes")
+            ),
         )
 
         for serial_number in target_group["inverterIds"]:
@@ -1001,9 +1036,13 @@ def get_user_dashboard_chart_history(user_key):
             target_group=target_group,
             effective_day=effective_day,
             request_timezone=request_timezone,
+            include_diagnostics=(
+                request.args.get("diagnostics", "").strip().lower()
+                in ("1", "true", "yes")
+            ),
         )
 
-        return jsonify(
+        response = jsonify(
             {
                 "success": True,
                 "user": {
@@ -1022,6 +1061,19 @@ def get_user_dashboard_chart_history(user_key):
                 },
             }
         )
+
+        # Previous-day payloads are immutable. Allow short-lived shared cache
+        # for faster date navigation and fewer repeated DB round-trips.
+        if effective_day < history_request["today"]:
+            response.headers["Cache-Control"] = (
+                "public, max-age=300, stale-while-revalidate=900"
+            )
+        else:
+            response.headers["Cache-Control"] = (
+                "public, max-age=20, stale-while-revalidate=40"
+            )
+
+        return response
     except Exception as e:
         logger.error(f"Error fetching dashboard chart history for {user_key}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1281,6 +1333,30 @@ def get_inverter_energy_summary(serial_number):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error fetching energy summary for {serial_number}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/inverter/<serial_number>/energy-summary/months", methods=["GET"])
+def get_inverter_energy_summary_months(serial_number):
+    """Get all calendar months that have persisted telemetry for an inverter."""
+    try:
+        if not neon_store or not neon_store.enabled:
+            return jsonify({"error": "Neon store is not initialized"}), 503
+
+        months = neon_store.fetch_energy_summary_available_months(serial_number)
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "inverterId": serial_number,
+                    "months": months,
+                },
+                "count": len(months),
+                "sourceUsed": "neon" if months else "none",
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error fetching available energy summary months for {serial_number}: {e}")
         return jsonify({"error": str(e)}), 500
 
 

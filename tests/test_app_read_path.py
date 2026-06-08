@@ -30,6 +30,7 @@ class StubNeonStore:
         self._latest = latest
         self.fetch_latest_calls = 0
         self.summary_samples = []
+        self.available_months = []
         self.summary_calls = []
         self.daily_payload = None
         self.daily_payload_by_serial = {}
@@ -45,6 +46,9 @@ class StubNeonStore:
             {"serial_number": serial_number, "since": since, "until": until}
         )
         return list(self.summary_samples)
+
+    def fetch_energy_summary_available_months(self, serial_number):
+        return list(self.available_months)
 
     def fetch_daily_payload(self, serial_number, day, timezone_name=None):
         self.daily_calls.append(
@@ -383,6 +387,26 @@ class AppReadPathTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(payload["error"], "Missing required query parameter: from")
+
+    def test_energy_summary_months_endpoint_returns_available_months(self):
+        serial_number = "INV-001"
+        neon_store = StubNeonStore(latest=None)
+        neon_store.available_months = ["2026-05", "2026-04", "2026-02"]
+        flask_app_module.scheduler = None
+        flask_app_module.neon_store = neon_store
+        flask_app_module.csv_writer = StubCsvWriter()
+        flask_app_module.watchpower_service = StubWatchPowerService(serial_number)
+
+        response = self.client.get(
+            f"/api/inverter/{serial_number}/energy-summary/months"
+        )
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["inverterId"], serial_number)
+        self.assertEqual(payload["data"]["months"], neon_store.available_months)
+        self.assertEqual(payload["count"], 3)
 
     def test_dashboard_bootstrap_uses_requested_timezone_for_daily_history(self):
         serial_number = "INV-001"
