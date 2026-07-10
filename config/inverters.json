@@ -1,6 +1,10 @@
 [
   {
     "serial_number": "00202507001060",
+    "accepted_telemetry_serials": [
+      "00202507001060",
+      "00202507001160"
+    ],
     "wifi_pn": "W0068107329284",
     "device_code": 2449,
     "device_address": 1,
@@ -13,6 +17,10 @@
   },
   {
     "serial_number": "00202507001160",
+    "accepted_telemetry_serials": [
+      "00202507001160",
+      "00202507000200"
+    ],
     "wifi_pn": "W0068087353239",
     "device_code": 2449,
     "device_address": 1,
@@ -97,6 +105,10 @@
   },
   {
     "serial_number": "00202504011260",
+    "accepted_telemetry_serials": [
+      "00202504011260",
+      "00202504011340"
+    ],
     "wifi_pn": "W0056409813041",
     "device_code": 2449,
     "device_address": 1,
@@ -109,6 +121,10 @@
   },
   {
     "serial_number": "00202504011340",
+    "accepted_telemetry_serials": [
+      "00202504011340",
+      "00202504011260"
+    ],
     "wifi_pn": "W0056369800009",
     "device_code": 2449,
     "device_address": 1,

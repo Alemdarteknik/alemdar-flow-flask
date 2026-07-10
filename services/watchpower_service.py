@@ -264,6 +264,7 @@ class WatchPowerService:
                         rows=rows,
                         titles=titles,
                         serial_number=serial_number,
+                        inverter_config=inverter_config,
                     )
                     if data_dict is not None:
                         data_dict["serial_number"] = serial_number
@@ -311,12 +312,29 @@ class WatchPowerService:
                 payload[title] = values[index]
         return payload
 
+    def _accepted_serials_for_inverter(
+        self, inverter_config: Optional[Dict[str, Any]]
+    ) -> List[str]:
+        if not inverter_config:
+            return []
+
+        accepted_serials: List[str] = []
+        for candidate in [
+            inverter_config.get("serial_number"),
+            *(inverter_config.get("accepted_telemetry_serials") or []),
+        ]:
+            normalized = str(candidate or "").strip()
+            if normalized and normalized not in accepted_serials:
+                accepted_serials.append(normalized)
+        return accepted_serials
+
     def _row_matches_serial(
         self,
         payload: Dict[str, Any],
-        expected_serial_number: str,
+        inverter_config: Optional[Dict[str, Any]],
     ) -> bool:
-        if not expected_serial_number:
+        accepted_serials = self._accepted_serials_for_inverter(inverter_config)
+        if not accepted_serials:
             return True
 
         candidates = [
@@ -324,16 +342,20 @@ class WatchPowerService:
             str(payload.get("serial_number") or "").strip(),
         ]
 
-        return expected_serial_number in candidates
+        return any(
+            candidate in accepted_serials for candidate in candidates if candidate
+        )
 
     def _filter_rows_for_serial(
         self,
         rows: List[Any],
         titles: List[str],
         serial_number: str,
+        inverter_config: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
         matching_rows: List[Any] = []
         saw_serial_marker = False
+        accepted_serials = self._accepted_serials_for_inverter(inverter_config)
 
         for row_obj in rows:
             payload = self._build_row_payload(row_obj, titles)
@@ -343,7 +365,7 @@ class WatchPowerService:
                 payload.get("serial_number") or ""
             ).strip():
                 saw_serial_marker = True
-            if self._row_matches_serial(payload, serial_number):
+            if self._row_matches_serial(payload, inverter_config):
                 matching_rows.append(row_obj)
 
         if matching_rows:
@@ -351,8 +373,9 @@ class WatchPowerService:
 
         if saw_serial_marker:
             logger.error(
-                "WatchPower returned rows for %s, but none matched the expected serial. Refusing to use mismatched rows.",
+                "WatchPower returned rows for %s, but none matched accepted serials %s. Refusing to use mismatched rows.",
                 serial_number,
+                accepted_serials or [serial_number],
             )
             return []
 
@@ -363,7 +386,11 @@ class WatchPowerService:
         return rows
 
     def _select_latest_row_payload(
-        self, rows: List[Any], titles: List[str], serial_number: str
+        self,
+        rows: List[Any],
+        titles: List[str],
+        serial_number: str,
+        inverter_config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[datetime]]:
         fallback_payload: Optional[Dict[str, Any]] = None
         fallback_reading_at: Optional[datetime] = None
@@ -374,6 +401,7 @@ class WatchPowerService:
             rows=rows,
             titles=titles,
             serial_number=serial_number,
+            inverter_config=inverter_config,
         )
 
         for row_obj in filtered_rows:
@@ -523,6 +551,7 @@ class WatchPowerService:
                     rows=rows,
                     titles=titles,
                     serial_number=serial_number,
+                    inverter_config=inverter_config,
                 )
                 rows = self._sort_rows_by_timestamp(rows=rows, titles=titles)
 
