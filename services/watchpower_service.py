@@ -311,6 +311,57 @@ class WatchPowerService:
                 payload[title] = values[index]
         return payload
 
+    def _row_matches_serial(
+        self,
+        payload: Dict[str, Any],
+        expected_serial_number: str,
+    ) -> bool:
+        if not expected_serial_number:
+            return True
+
+        candidates = [
+            str(payload.get("SN") or "").strip(),
+            str(payload.get("serial_number") or "").strip(),
+        ]
+
+        return expected_serial_number in candidates
+
+    def _filter_rows_for_serial(
+        self,
+        rows: List[Any],
+        titles: List[str],
+        serial_number: str,
+    ) -> List[Any]:
+        matching_rows: List[Any] = []
+        saw_serial_marker = False
+
+        for row_obj in rows:
+            payload = self._build_row_payload(row_obj, titles)
+            if not payload:
+                continue
+            if str(payload.get("SN") or "").strip() or str(
+                payload.get("serial_number") or ""
+            ).strip():
+                saw_serial_marker = True
+            if self._row_matches_serial(payload, serial_number):
+                matching_rows.append(row_obj)
+
+        if matching_rows:
+            return matching_rows
+
+        if saw_serial_marker:
+            logger.error(
+                "WatchPower returned rows for %s, but none matched the expected serial. Refusing to use mismatched rows.",
+                serial_number,
+            )
+            return []
+
+        logger.warning(
+            "WatchPower returned no serial markers for %s; falling back to unfiltered rows",
+            serial_number,
+        )
+        return rows
+
     def _select_latest_row_payload(
         self, rows: List[Any], titles: List[str], serial_number: str
     ) -> Tuple[Optional[Dict[str, Any]], Optional[datetime]]:
@@ -319,7 +370,13 @@ class WatchPowerService:
         latest_payload: Optional[Dict[str, Any]] = None
         latest_reading_at: Optional[datetime] = None
 
-        for row_obj in rows:
+        filtered_rows = self._filter_rows_for_serial(
+            rows=rows,
+            titles=titles,
+            serial_number=serial_number,
+        )
+
+        for row_obj in filtered_rows:
             payload = self._build_row_payload(row_obj, titles)
             if not payload:
                 continue
@@ -340,14 +397,19 @@ class WatchPowerService:
         if latest_payload is not None:
             return latest_payload, latest_reading_at
 
-        if rows:
-            fallback_payload = self._build_row_payload(rows[-1], titles)
+        if filtered_rows:
+            fallback_payload = self._build_row_payload(filtered_rows[-1], titles)
             fallback_reading_at = parse_watchpower_timestamp(
                 fallback_payload.get("Data E Hora") if fallback_payload else None,
                 self.timezone_name,
             )
             logger.warning(
                 "WatchPower returned rows without valid timestamps for %s; falling back to last row",
+                serial_number,
+            )
+        else:
+            logger.error(
+                "No WatchPower rows matched serial %s after filtering; skipping payload.",
                 serial_number,
             )
 
@@ -457,6 +519,11 @@ class WatchPowerService:
                     else:
                         rows.append(row)
 
+                rows = self._filter_rows_for_serial(
+                    rows=rows,
+                    titles=titles,
+                    serial_number=serial_number,
+                )
                 rows = self._sort_rows_by_timestamp(rows=rows, titles=titles)
 
                 return {

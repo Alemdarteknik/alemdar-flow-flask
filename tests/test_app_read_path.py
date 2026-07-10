@@ -29,6 +29,7 @@ class StubNeonStore:
         self.enabled = True
         self._latest = latest
         self.fetch_latest_calls = 0
+        self.inverters_list = []
         self.summary_samples = []
         self.available_months = []
         self.summary_calls = []
@@ -40,6 +41,9 @@ class StubNeonStore:
     def fetch_latest_reading(self, serial_number):
         self.fetch_latest_calls += 1
         return self._latest
+
+    def fetch_inverters_list(self):
+        return list(self.inverters_list)
 
     def fetch_energy_summary_samples(self, serial_number, since=None, until=None):
         self.summary_calls.append(
@@ -303,6 +307,53 @@ class AppReadPathTests(unittest.TestCase):
             )
         )
 
+    def test_inverters_endpoint_prefers_neon_roster_and_merges_config_fields(self):
+        flask_app_module.watchpower_service = StubWatchPowerService(["INV-001"])
+        flask_app_module.neon_store = StubNeonStore(latest=None)
+        flask_app_module.neon_store.inverters_list = [
+            {
+                "serial_number": "INV-001",
+                "alias": "OG-002",
+                "description": "Baskent",
+                "system_type": "offgrid",
+                "username": "Baskent",
+                "location": "",
+                "wifi_pn": "WIFI-001",
+                "device_code": 2449,
+                "device_address": 1,
+            }
+        ]
+
+        original_loader = flask_app_module._load_inverters_config
+        flask_app_module._load_inverters_config = lambda: [
+            {
+                "serial_number": "INV-001",
+                "alias": "OG-003",
+                "description": "Baskent",
+                "system_type": "offgrid",
+                "username": "Baskent",
+                "location": "Lefkosa",
+                "wifi_pn": "WIFI-001",
+                "device_code": 2449,
+                "device_address": 1,
+                "password": "secret",
+            }
+        ]
+
+        try:
+            response = self.client.get("/api/inverters")
+        finally:
+            flask_app_module._load_inverters_config = original_loader
+
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["inverters"][0]["alias"], "OG-002")
+        self.assertEqual(payload["inverters"][0]["description"], "Baskent")
+        self.assertEqual(payload["inverters"][0]["location"], "Lefkosa")
+        self.assertEqual(payload["inverters"][0]["password"], "secret")
+
     def test_build_telemetry_health_obeys_staleness_threshold_boundaries(self):
         flask_app_module.INVERTER_STALE_THRESHOLD_MINUTES = 9
         now = datetime(2026, 3, 19, 9, 21, tzinfo=timezone.utc)
@@ -367,12 +418,19 @@ class AppReadPathTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["success"])
         self.assertEqual(payload["data"]["inverterId"], serial_number)
+        self.assertEqual(payload["data"]["monthKey"], "2026-03")
         self.assertEqual(payload["sampleCount"], 2)
+        self.assertEqual(payload["intervalCount"], 1)
+        self.assertTrue(payload["hasHistory"])
         self.assertEqual(payload["sourceUsed"], "neon")
-        self.assertEqual(len(payload["data"]["samples"]), 2)
+        self.assertEqual(payload["insufficientReason"], None)
+        self.assertEqual(len(payload["data"]["dailyRows"]), 31)
         self.assertEqual(
-            payload["data"]["samples"][0]["readingAt"], "2026-03-19T09:00:00+00:00"
+            payload["data"]["dailyRows"][18]["period"], "2026-03-19"
         )
+        self.assertEqual(payload["data"]["dailyRows"][18]["loadKwh"], 0.5)
+        self.assertEqual(payload["data"]["dailyRows"][18]["solarPvKwh"], 0.3)
+        self.assertEqual(payload["data"]["dailyRows"][18]["gridUsedKwh"], 0.2)
         self.assertEqual(neon_store.summary_calls[0]["serial_number"], serial_number)
 
     def test_energy_summary_endpoint_requires_timeframe(self):

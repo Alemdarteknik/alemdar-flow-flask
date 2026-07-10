@@ -6,7 +6,12 @@ from services.energy_summary import build_energy_summary
 
 class EnergySummaryTests(unittest.TestCase):
     def test_empty_samples_return_no_history(self):
-        result = build_energy_summary("INV-001", [])
+        result = build_energy_summary(
+            "INV-001",
+            [],
+            datetime(2026, 3, 1, tzinfo=timezone.utc),
+            datetime(2026, 4, 1, tzinfo=timezone.utc),
+        )
 
         self.assertFalse(result.has_history)
         self.assertEqual(result.reason, "no_samples")
@@ -21,8 +26,12 @@ class EnergySummaryTests(unittest.TestCase):
             "raw_payload": {},
         }
 
-        result = build_energy_summary("INV-001", [point])
-
+        result = build_energy_summary(
+            "INV-001",
+            [point],
+            datetime(2026, 3, 1, tzinfo=timezone.utc),
+            datetime(2026, 4, 1, tzinfo=timezone.utc),
+        )
         self.assertFalse(result.has_history)
         self.assertEqual(result.reason, "only_one_point")
         self.assertEqual(result.timestamped_point_count, 1)
@@ -46,7 +55,12 @@ class EnergySummaryTests(unittest.TestCase):
             },
         ]
 
-        result = build_energy_summary("INV-001", samples)
+        result = build_energy_summary(
+            "INV-001",
+            samples,
+            datetime(2026, 3, 1, tzinfo=timezone.utc),
+            datetime(2026, 4, 1, tzinfo=timezone.utc),
+        )
 
         self.assertFalse(result.has_history)
         self.assertEqual(result.reason, "no_positive_intervals")
@@ -78,15 +92,20 @@ class EnergySummaryTests(unittest.TestCase):
             },
         ]
 
-        result = build_energy_summary("INV-001", samples)
+        result = build_energy_summary(
+            "INV-001",
+            samples,
+            datetime(2026, 3, 1, tzinfo=timezone.utc),
+            datetime(2026, 4, 1, tzinfo=timezone.utc),
+        )
 
         self.assertTrue(result.has_history)
         self.assertIsNone(result.reason)
         self.assertEqual(result.interval_count, 1)
         self.assertIsNotNone(result.summary)
         self.assertEqual(result.summary["inverterId"], "INV-001")
-        self.assertEqual(len(result.summary["daily30d"]), 30)
-        self.assertEqual(len(result.summary["monthly12m"]), 12)
+        self.assertEqual(result.summary["monthKey"], "2026-03")
+        self.assertEqual(len(result.summary["dailyRows"]), 31)
 
 
 if __name__ == "__main__":

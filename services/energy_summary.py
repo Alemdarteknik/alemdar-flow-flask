@@ -5,8 +5,18 @@ Energy summary helpers for inverter history and persisted telemetry samples.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
+
+
+@dataclass(frozen=True)
+class EnergySummaryBuildResult:
+    summary: Optional[Dict[str, Any]]
+    has_history: bool
+    reason: Optional[str]
+    timestamped_point_count: int
+    interval_count: int
 
 
 def _to_float(value: Any) -> float:
@@ -47,42 +57,6 @@ def _zero_bucket(period: str) -> Dict[str, Any]:
 
 def _round_energy(value: float) -> float:
     return round(value + 1e-12, 3)
-
-
-def _create_recent_day_keys(days: int) -> List[str]:
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    return [_iso_day_key(today - timedelta(days=offset)) for offset in range(days - 1, -1, -1)]
-
-
-def _create_recent_month_keys(months: int) -> List[str]:
-    now = datetime.now()
-    keys: List[str] = []
-    year = now.year
-    month = now.month
-    for offset in range(months - 1, -1, -1):
-        target_month = month - offset
-        target_year = year
-        while target_month <= 0:
-            target_month += 12
-            target_year -= 1
-        keys.append(f"{target_year:04d}-{target_month:02d}")
-    return keys
-
-
-def _finalize_buckets(
-    order: Iterable[str], source: Dict[str, Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    buckets: List[Dict[str, Any]] = []
-    for period in order:
-        bucket = dict(source.get(period) or _zero_bucket(period))
-        bucket["loadKwh"] = _round_energy(bucket["loadKwh"])
-        bucket["solarPvKwh"] = _round_energy(bucket["solarPvKwh"])
-        bucket["batteryChargedKwh"] = _round_energy(bucket["batteryChargedKwh"])
-        bucket["batteryDischargedKwh"] = _round_energy(bucket["batteryDischargedKwh"])
-        bucket["gridUsedKwh"] = _round_energy(bucket["gridUsedKwh"])
-        bucket["gridExportedKwh"] = _round_energy(bucket["gridExportedKwh"])
-        buckets.append(bucket)
-    return buckets
 
 
 def _normalize_payload(raw_payload: Any) -> Dict[str, Any]:
@@ -127,7 +101,10 @@ def _build_point(sample: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _add_interval_energy(
-    bucket: Dict[str, Any], previous: Dict[str, Any], current: Dict[str, Any], dt_hours: float
+    bucket: Dict[str, Any],
+    previous: Dict[str, Any],
+    current: Dict[str, Any],
+    dt_hours: float,
 ) -> None:
     def to_kwh(prev_w: float, curr_w: float) -> float:
         return ((prev_w + curr_w) / 2.0) * dt_hours / 1000.0
@@ -140,25 +117,72 @@ def _add_interval_energy(
     bucket["batteryDischargedKwh"] += to_kwh(
         previous["battery_discharged_w"], current["battery_discharged_w"]
     )
-    bucket["gridUsedKwh"] += to_kwh(
-        previous["grid_used_w"], current["grid_used_w"]
-    )
+    bucket["gridUsedKwh"] += to_kwh(previous["grid_used_w"], current["grid_used_w"])
+
+
+def _build_day_keys(from_timestamp: datetime, to_timestamp: datetime) -> List[str]:
+    start = from_timestamp.astimezone(timezone.utc).date()
+    end_exclusive = to_timestamp.astimezone(timezone.utc).date()
+    if end_exclusive <= start:
+        end_exclusive = start + timedelta(days=1)
+
+    keys: List[str] = []
+    current = start
+    while current < end_exclusive:
+        keys.append(current.isoformat())
+        current += timedelta(days=1)
+    return keys
+
+
+def _finalize_buckets(
+    order: Iterable[str], source: Dict[str, Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    buckets: List[Dict[str, Any]] = []
+    for period in order:
+        bucket = dict(source.get(period) or _zero_bucket(period))
+        bucket["loadKwh"] = _round_energy(bucket["loadKwh"])
+        bucket["solarPvKwh"] = _round_energy(bucket["solarPvKwh"])
+        bucket["batteryChargedKwh"] = _round_energy(bucket["batteryChargedKwh"])
+        bucket["batteryDischargedKwh"] = _round_energy(bucket["batteryDischargedKwh"])
+        bucket["gridUsedKwh"] = _round_energy(bucket["gridUsedKwh"])
+        bucket["gridExportedKwh"] = _round_energy(bucket["gridExportedKwh"])
+        buckets.append(bucket)
+    return buckets
 
 
 def build_energy_summary(
-    inverter_id: str, samples: Iterable[Dict[str, Any]]
-) -> Dict[str, Any]:
+    inverter_id: str,
+    samples: Iterable[Dict[str, Any]],
+    from_timestamp: datetime,
+    to_timestamp: datetime,
+) -> EnergySummaryBuildResult:
     points = [
         point
-        for point in (
-            _build_point(sample) for sample in samples
-        )
+        for point in (_build_point(sample) for sample in samples)
         if point is not None
     ]
     points.sort(key=lambda item: item["timestamp"])
 
+    if not points:
+        return EnergySummaryBuildResult(
+            summary=None,
+            has_history=False,
+            reason="no_samples",
+            timestamped_point_count=0,
+            interval_count=0,
+        )
+
+    if len(points) == 1:
+        return EnergySummaryBuildResult(
+            summary=None,
+            has_history=False,
+            reason="only_one_point",
+            timestamped_point_count=1,
+            interval_count=0,
+        )
+
     day_buckets: Dict[str, Dict[str, Any]] = {}
-    month_buckets: Dict[str, Dict[str, Any]] = {}
+    interval_count = 0
 
     for index in range(1, len(points)):
         previous = points[index - 1]
@@ -169,17 +193,37 @@ def build_energy_summary(
         if dt_hours <= 0:
             continue
 
+        interval_count += 1
         day_key = _iso_day_key(current["timestamp"])
-        month_key = _iso_month_key(current["timestamp"])
         day_bucket = day_buckets.setdefault(day_key, _zero_bucket(day_key))
-        month_bucket = month_buckets.setdefault(month_key, _zero_bucket(month_key))
-
         _add_interval_energy(day_bucket, previous, current, dt_hours)
-        _add_interval_energy(month_bucket, previous, current, dt_hours)
 
-    return {
+    if interval_count == 0:
+        return EnergySummaryBuildResult(
+            summary=None,
+            has_history=False,
+            reason="no_positive_intervals",
+            timestamped_point_count=len(points),
+            interval_count=0,
+        )
+
+    month_key = _iso_month_key(from_timestamp.astimezone(timezone.utc))
+    summary = {
         "inverterId": inverter_id,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "daily30d": _finalize_buckets(_create_recent_day_keys(30), day_buckets),
-        "monthly12m": _finalize_buckets(_create_recent_month_keys(12), month_buckets),
+        "monthKey": month_key,
+        "from": from_timestamp.isoformat(),
+        "to": to_timestamp.isoformat(),
+        "dailyRows": _finalize_buckets(
+            _build_day_keys(from_timestamp, to_timestamp),
+            day_buckets,
+        ),
     }
+
+    return EnergySummaryBuildResult(
+        summary=summary,
+        has_history=True,
+        reason=None,
+        timestamped_point_count=len(points),
+        interval_count=interval_count,
+    )

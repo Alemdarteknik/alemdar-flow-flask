@@ -199,6 +199,38 @@ class NeonStore:
             if conn is None:
                 active_conn.commit()
 
+    def fetch_inverters_list(self) -> List[Dict[str, Any]]:
+        if not self.enabled:
+            return []
+
+        sql = """
+            SELECT
+                i.serial_number,
+                COALESCE(NULLIF(c.nickname, ''), NULLIF(i.alias, ''), i.serial_number) AS alias,
+                COALESCE(NULLIF(c.full_name, ''), NULLIF(i.description, ''), NULLIF(i.watchpower_username, ''), i.serial_number) AS description,
+                i.system_type,
+                COALESCE(NULLIF(c.full_name, ''), NULLIF(i.watchpower_username, ''), NULLIF(i.description, ''), '') AS username,
+                COALESCE(NULLIF(c.location, ''), '') AS location,
+                i.wifi_pn,
+                i.device_code,
+                i.device_address
+            FROM public.inverters i
+            LEFT JOIN public.customer_inverters ci
+                ON ci.serial_number = i.serial_number
+            LEFT JOIN public.customers c
+                ON c.id = ci.customer_id
+            ORDER BY
+                COALESCE(NULLIF(c.full_name, ''), NULLIF(i.description, ''), NULLIF(i.watchpower_username, ''), i.serial_number),
+                i.serial_number
+        """
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+
+        return [dict(row) for row in rows]
+
     def ensure_poll_audit_table(self) -> None:
         """Create scheduler poll audit table if it doesn't exist."""
         if not self.enabled:

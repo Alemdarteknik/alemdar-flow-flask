@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
 from services.neon_store import NeonStore
 from services.reading_resolver import resolve_latest_reading
 from services.scheduler import PollingScheduler
@@ -367,6 +368,74 @@ def _write_inverters_config(inverters):
         json.dump(inverters, f, indent=2)
 
 
+def _build_config_map(inverters):
+    config_map = {}
+    for inverter in inverters:
+        serial_number = str(inverter.get("serial_number") or "").strip()
+        if serial_number:
+            config_map[serial_number] = inverter
+    return config_map
+
+
+def _build_inverters_list_from_neon():
+    if not neon_store or not neon_store.enabled:
+        return []
+
+    roster = neon_store.fetch_inverters_list()
+    if not roster:
+        return []
+
+    config_map = _build_config_map(_load_inverters_config())
+    merged = []
+
+    for inverter in roster:
+        serial_number = str(inverter.get("serial_number") or "").strip()
+        if not serial_number:
+            continue
+
+        config = config_map.get(serial_number, {})
+        merged.append(
+            {
+                "serial_number": serial_number,
+                "alias": str(
+                    inverter.get("alias")
+                    or config.get("alias")
+                    or serial_number
+                ).strip(),
+                "system_type": str(
+                    inverter.get("system_type")
+                    or config.get("system_type")
+                    or "unknown"
+                ).strip(),
+                "description": str(
+                    inverter.get("description")
+                    or config.get("description")
+                    or ""
+                ).strip(),
+                "username": str(
+                    inverter.get("username")
+                    or config.get("username")
+                    or ""
+                ).strip(),
+                "location": str(
+                    inverter.get("location")
+                    or config.get("location")
+                    or ""
+                ).strip(),
+                "wifi_pn": inverter.get("wifi_pn") or config.get("wifi_pn"),
+                "device_code": inverter.get("device_code")
+                if inverter.get("device_code") is not None
+                else config.get("device_code"),
+                "device_address": inverter.get("device_address")
+                if inverter.get("device_address") is not None
+                else config.get("device_address"),
+                "password": config.get("password", ""),
+            }
+        )
+
+    return merged
+
+
 def _normalize_group_token(input_value):
     normalized = (
         unicodedata.normalize("NFKD", str(input_value or ""))
@@ -381,10 +450,6 @@ def _normalize_group_token(input_value):
 
 
 def _pick_grouping_base(inverter):
-    alias = str(inverter.get("alias") or "").strip()
-    if alias:
-        return alias
-
     username = str(inverter.get("username") or "").strip()
     if username:
         return username
@@ -392,6 +457,10 @@ def _pick_grouping_base(inverter):
     description = str(inverter.get("description") or "").strip()
     if description:
         return description
+
+    alias = str(inverter.get("alias") or "").strip()
+    if alias:
+        return alias
 
     return "unknown-user"
 
@@ -603,7 +672,9 @@ def get_inverters():
         if not watchpower_service:
             return jsonify({"error": "Service not initialized"}), 503
 
-        inverters = watchpower_service.get_inverters_list()
+        inverters = _build_inverters_list_from_neon()
+        if not inverters:
+            inverters = watchpower_service.get_inverters_list()
         return jsonify(
             {"success": True, "count": len(inverters), "inverters": inverters}
         )
@@ -1356,7 +1427,9 @@ def get_inverter_energy_summary_months(serial_number):
             }
         )
     except Exception as e:
-        logger.error(f"Error fetching available energy summary months for {serial_number}: {e}")
+        logger.error(
+            f"Error fetching available energy summary months for {serial_number}: {e}"
+        )
         return jsonify({"error": str(e)}), 500
 
 
