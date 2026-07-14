@@ -354,6 +354,74 @@ class AppReadPathTests(unittest.TestCase):
         self.assertEqual(payload["inverters"][0]["location"], "Lefkosa")
         self.assertEqual(payload["inverters"][0]["password"], "secret")
 
+    def test_inverters_endpoint_filters_out_unconfigured_neon_rows(self):
+        flask_app_module.watchpower_service = StubWatchPowerService(
+            ["INV-001", "INV-002"]
+        )
+        flask_app_module.neon_store = StubNeonStore(latest=None)
+        flask_app_module.neon_store.inverters_list = [
+            {
+                "serial_number": "INV-001",
+                "alias": "OG-001",
+                "description": "Didem",
+                "system_type": "offgrid",
+                "username": "Didem",
+                "location": "",
+                "wifi_pn": "WIFI-001",
+                "device_code": 2449,
+                "device_address": 1,
+            },
+            {
+                "serial_number": "INV-OLD",
+                "alias": "OG-999",
+                "description": "Retired inverter",
+                "system_type": "offgrid",
+                "username": "Retired",
+                "location": "",
+                "wifi_pn": "WIFI-999",
+                "device_code": 2449,
+                "device_address": 1,
+            },
+        ]
+
+        original_loader = flask_app_module._load_inverters_config
+        flask_app_module._load_inverters_config = lambda: [
+            {
+                "serial_number": "INV-001",
+                "alias": "OG-001",
+                "description": "Didem",
+                "system_type": "offgrid",
+                "username": "Didem",
+                "wifi_pn": "WIFI-001",
+                "device_code": 2449,
+                "device_address": 1,
+            },
+            {
+                "serial_number": "INV-002",
+                "alias": "OG-002",
+                "description": "Ragip",
+                "system_type": "offgrid",
+                "username": "Ragip",
+                "wifi_pn": "WIFI-002",
+                "device_code": 2449,
+                "device_address": 1,
+            },
+        ]
+
+        try:
+            response = self.client.get("/api/inverters")
+        finally:
+            flask_app_module._load_inverters_config = original_loader
+
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(
+            [entry["serial_number"] for entry in payload["inverters"]],
+            ["INV-001", "INV-002"],
+        )
+
     def test_build_telemetry_health_obeys_staleness_threshold_boundaries(self):
         flask_app_module.INVERTER_STALE_THRESHOLD_MINUTES = 9
         now = datetime(2026, 3, 19, 9, 21, tzinfo=timezone.utc)

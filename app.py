@@ -382,17 +382,28 @@ def _build_inverters_list_from_neon():
         return []
 
     roster = neon_store.fetch_inverters_list()
-    if not roster:
+    config_entries = _load_inverters_config()
+    config_map = _build_config_map(config_entries)
+    if not roster and not config_map:
         return []
 
-    config_map = _build_config_map(_load_inverters_config())
-    merged = []
-
+    roster_map = {}
     for inverter in roster:
         serial_number = str(inverter.get("serial_number") or "").strip()
-        if not serial_number:
-            continue
+        if serial_number:
+            roster_map[serial_number] = inverter
 
+    # The configured inverter list is the source of truth for the active fleet.
+    # Neon can retain historical/replaced devices, so only merge rows that still
+    # exist in the current config to avoid surfacing faulty swaps again.
+    active_serials = list(config_map.keys())
+    if not active_serials:
+        active_serials = list(roster_map.keys())
+
+    merged = []
+
+    for serial_number in active_serials:
+        inverter = roster_map.get(serial_number, {})
         config = config_map.get(serial_number, {})
         merged.append(
             {
