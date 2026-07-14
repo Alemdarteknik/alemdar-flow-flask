@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from services.energy_summary import build_energy_summary
 from services.neon_store import NeonStore
 from services.reading_resolver import resolve_latest_reading
 from services.scheduler import PollingScheduler
@@ -1355,7 +1356,7 @@ def get_inverter_history(serial_number):
 
 @app.route("/api/inverter/<serial_number>/energy-summary", methods=["GET"])
 def get_inverter_energy_summary(serial_number):
-    """Get raw Neon timeline samples for Totals calculations."""
+    """Get a server-side energy summary for a specific inverter and month."""
     try:
         if not neon_store or not neon_store.enabled:
             return jsonify({"error": "Neon store is not initialized"}), 503
@@ -1378,37 +1379,23 @@ def get_inverter_energy_summary(serial_number):
             to_timestamp.isoformat(),
         )
 
-        normalized_samples = []
-        for sample in samples:
-            reading_at = sample.get("reading_at")
-            normalized_samples.append(
-                {
-                    "readingAt": (
-                        reading_at.isoformat()
-                        if isinstance(reading_at, datetime)
-                        else None
-                    ),
-                    "loadPowerW": sample.get("load_power_w"),
-                    "pvPowerW": sample.get("pv_power_w"),
-                    "gridPowerW": sample.get("grid_power_w"),
-                    "rawPayload": sample.get("raw_payload"),
-                }
-            )
+        result = build_energy_summary(
+            inverter_id=serial_number,
+            samples=samples,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
 
         return jsonify(
             {
                 "success": True,
-                "data": {
-                    "inverterId": serial_number,
-                    "generatedAt": datetime.now(timezone.utc).isoformat(),
-                    "from": from_timestamp.isoformat(),
-                    "to": to_timestamp.isoformat(),
-                    "samples": normalized_samples,
-                },
-                "hasHistory": len(normalized_samples) > 0,
-                "sampleCount": len(normalized_samples),
-                "sourceUsed": "neon" if normalized_samples else "none",
+                "data": result.summary,
+                "hasHistory": result.has_history,
+                "sampleCount": result.timestamped_point_count,
+                "intervalCount": result.interval_count,
+                "sourceUsed": "neon" if result.has_history else "none",
                 "warning": None,
+                "insufficientReason": result.reason,
             }
         )
     except ValueError as e:

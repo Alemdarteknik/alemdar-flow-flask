@@ -122,7 +122,10 @@ def _add_interval_energy(
 
 def _build_day_keys(from_timestamp: datetime, to_timestamp: datetime) -> List[str]:
     start = from_timestamp.astimezone(timezone.utc).date()
-    end_exclusive = to_timestamp.astimezone(timezone.utc).date()
+    end_timestamp = to_timestamp.astimezone(timezone.utc)
+    end_exclusive = end_timestamp.date()
+    if end_timestamp.time() != datetime.min.time():
+        end_exclusive += timedelta(days=1)
     if end_exclusive <= start:
         end_exclusive = start + timedelta(days=1)
 
