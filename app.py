@@ -15,7 +15,10 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from services.energy_summary import build_energy_summary
+from services.energy_summary import (
+    build_energy_summary,
+    build_hourly_battery_profile,
+)
 from services.neon_store import NeonStore
 from services.reading_resolver import resolve_latest_reading
 from services.scheduler import PollingScheduler
@@ -382,7 +385,11 @@ def _build_inverters_list_from_neon():
     if not neon_store or not neon_store.enabled:
         return []
 
-    roster = neon_store.fetch_inverters_list()
+    try:
+        roster = neon_store.fetch_inverters_list()
+    except Exception as e:
+        logger.warning(f"Neon fetch_inverters_list failed, falling back to config: {e}")
+        return []
     config_entries = _load_inverters_config()
     config_map = _build_config_map(config_entries)
     if not roster and not config_map:
@@ -449,8 +456,11 @@ def _build_inverters_list_from_neon():
 
 
 def _normalize_group_token(input_value):
+    # URL-decode first so %C3%BC (ü) becomes actual characters
+    from urllib.parse import unquote
+    decoded = unquote(str(input_value or ""))
     normalized = (
-        unicodedata.normalize("NFKD", str(input_value or ""))
+        unicodedata.normalize("NFKD", decoded)
         .encode("ascii", "ignore")
         .decode("ascii")
         .lower()
@@ -1428,6 +1438,47 @@ def get_inverter_energy_summary_months(serial_number):
         logger.error(
             f"Error fetching available energy summary months for {serial_number}: {e}"
         )
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/inverter/<serial_number>/energy-summary/hourly-battery", methods=["GET"])
+def get_inverter_hourly_battery_profile(serial_number):
+    """Get average 24-hour battery charge/discharge profile for a month."""
+    try:
+        if not neon_store or not neon_store.enabled:
+            return jsonify({"error": "Neon store is not initialized"}), 503
+
+        from_timestamp = _parse_required_utc_timestamp_arg("from")
+        to_timestamp = _parse_required_utc_timestamp_arg("to")
+        if from_timestamp > to_timestamp:
+            return jsonify({"error": "'from' must be less than or equal to 'to'"}), 400
+
+        samples = neon_store.fetch_energy_summary_samples(
+            serial_number=serial_number,
+            since=from_timestamp,
+            until=to_timestamp,
+        )
+
+        result = build_hourly_battery_profile(
+            samples=samples,
+            since=from_timestamp,
+            until=to_timestamp,
+        )
+
+        # "no_samples" is a valid empty state, not an error
+        is_empty = not result.success and result.reason == "no_samples"
+        return jsonify(
+            {
+                "success": True if is_empty else result.success,
+                "data": {"points": result.points} if result.points else None,
+                "sampleCount": len(samples),
+                "error": None if is_empty else (result.reason if not result.success else None),
+            }
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error fetching hourly battery profile for {serial_number}: {e}")
         return jsonify({"error": str(e)}), 500
 
 

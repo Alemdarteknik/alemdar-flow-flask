@@ -19,6 +19,63 @@ class EnergySummaryBuildResult:
     interval_count: int
 
 
+@dataclass(frozen=True)
+class HourlyBatteryProfileResult:
+    success: bool
+    reason: Optional[str]
+    points: Optional[List[Dict[str, Any]]]
+
+
+def _hour_key(value: datetime) -> int:
+    return value.astimezone(timezone.utc).hour
+
+
+def build_hourly_battery_profile(
+    samples: Iterable[Dict[str, Any]],
+    since: datetime,
+    until: datetime,
+) -> HourlyBatteryProfileResult:
+    """Build an average 24-hour battery charge/discharge profile (in watts) from raw samples."""
+    points = [
+        point
+        for point in (_build_point(sample) for sample in samples)
+        if point is not None
+    ]
+    points.sort(key=lambda item: item["timestamp"])
+
+    if not points:
+        return HourlyBatteryProfileResult(
+            success=False, reason="no_samples", points=None
+        )
+
+    # Group by hour of day (0-23)
+    hour_buckets: Dict[int, List[float]] = {h: [] for h in range(24)}
+
+    for p in points:
+        h = _hour_key(p["timestamp"])
+        net_battery_w = p["battery_charged_w"] - p["battery_discharged_w"]
+        hour_buckets[h].append(net_battery_w)
+
+    result_points: List[Dict[str, Any]] = []
+    for h in range(24):
+        values = hour_buckets[h]
+        if values:
+            avg_w = round(sum(values) / len(values), 1)
+        else:
+            avg_w = 0.0
+        result_points.append({
+            "hour": h,
+            "label": f"{h:02d}:00",
+            "avgBatteryWatts": avg_w,
+        })
+
+    return HourlyBatteryProfileResult(
+        success=True,
+        reason=None,
+        points=result_points,
+    )
+
+
 def _to_float(value: Any) -> float:
     try:
         if value in (None, ""):
