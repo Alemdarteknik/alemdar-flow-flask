@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from requests.exceptions import Timeout as RequestsTimeout
 from watchpower_api import WatchPowerAPI
@@ -40,6 +41,7 @@ class WatchPowerService:
         self.timezone_name = timezone_name or os.getenv(
             "WATCHPOWER_TIMEZONE", "Europe/Nicosia"
         )
+        self._timezone = ZoneInfo(self.timezone_name)
         self.daily_retry_attempts = max(
             1, int(os.getenv("WATCHPOWER_DAILY_RETRY_ATTEMPTS", 2))
         )
@@ -217,6 +219,41 @@ class WatchPowerService:
 
         return None
 
+    def _watchpower_today(self) -> date:
+        return datetime.now(self._timezone).date()
+
+    def _extract_latest_data_from_raw(
+        self,
+        raw_data: Optional[Dict[str, Any]],
+        serial_number: str,
+        inverter_config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if raw_data and "dat" in raw_data and "row" in raw_data["dat"]:
+            rows = raw_data["dat"]["row"]
+            titles = self._extract_titles(raw_data["dat"].get("title", []))
+
+            if rows:
+                data_dict, reading_at = self._select_latest_row_payload(
+                    rows=rows,
+                    titles=titles,
+                    serial_number=serial_number,
+                    inverter_config=inverter_config,
+                )
+                if data_dict is not None:
+                    data_dict["serial_number"] = serial_number
+                    data_dict["alias"] = inverter_config.get("alias", serial_number)
+                    data_dict["system_type"] = inverter_config.get(
+                        "system_type", "unknown"
+                    )
+                    return {
+                        "data": data_dict,
+                        "raw": raw_data,
+                        "inverter_config": inverter_config,
+                        "reading_at": reading_at,
+                    }
+
+        return None
+
     def get_latest_data(self, serial_number: str) -> Optional[Dict[str, Any]]:
         """
         Get latest data for a specific inverter
@@ -242,8 +279,7 @@ class WatchPowerService:
             return None
 
         try:
-            # Get today's data
-            today = date.today()
+            today = self._watchpower_today()
             logger.info(f"Fetching daily data for {serial_number} from WatchPower API")
             raw_data = self._fetch_daily_data_with_retries(
                 api_client=api_client,
@@ -255,38 +291,45 @@ class WatchPowerService:
                 f"WatchPower API response for {serial_number}: {raw_data is not None}"
             )
 
-            if raw_data and "dat" in raw_data and "row" in raw_data["dat"]:
-                rows = raw_data["dat"]["row"]
-                titles = self._extract_titles(raw_data["dat"].get("title", []))
+            result = self._extract_latest_data_from_raw(
+                raw_data=raw_data,
+                serial_number=serial_number,
+                inverter_config=inverter_config,
+            )
+            if result is None:
+                yesterday = today - date.resolution
+                logger.warning(
+                    "No usable rows for %s on %s; trying %s",
+                    serial_number,
+                    today.isoformat(),
+                    yesterday.isoformat(),
+                )
+                fallback_raw_data = self._fetch_daily_data_with_retries(
+                    api_client=api_client,
+                    inverter_config=inverter_config,
+                    target_day=yesterday,
+                    serial_number=serial_number,
+                )
+                result = self._extract_latest_data_from_raw(
+                    raw_data=fallback_raw_data,
+                    serial_number=serial_number,
+                    inverter_config=inverter_config,
+                )
 
-                if rows:
-                    data_dict, reading_at = self._select_latest_row_payload(
-                        rows=rows,
-                        titles=titles,
-                        serial_number=serial_number,
-                        inverter_config=inverter_config,
-                    )
-                    if data_dict is not None:
-                        data_dict["serial_number"] = serial_number
-                        data_dict["alias"] = inverter_config.get("alias", serial_number)
-                        data_dict["system_type"] = inverter_config.get(
-                            "system_type", "unknown"
-                        )
+            if result is None:
+                logger.warning(f"No data rows found for {serial_number}")
+                return None
 
-                        logger.info(
-                            "Successfully fetched latest data for %s at %s",
-                            serial_number,
-                            reading_at.isoformat() if reading_at else "unknown time",
-                        )
-                        return {
-                            "data": data_dict,
-                            "raw": raw_data,
-                            "inverter_config": inverter_config,
-                            "reading_at": reading_at,
-                        }
-
-            logger.warning(f"No data rows found for {serial_number}")
-            return None
+            logger.info(
+                "Successfully fetched latest data for %s at %s",
+                serial_number,
+                (
+                    result["reading_at"].isoformat()
+                    if result.get("reading_at")
+                    else "unknown time"
+                ),
+            )
+            return result
 
         except Exception as e:
             logger.error(f"Failed to fetch data for {serial_number}: {e}")
@@ -511,7 +554,7 @@ class WatchPowerService:
             return None
 
         try:
-            target_day = day or date.today()
+            target_day = day or self._watchpower_today()
             logger.info(f"Fetching daily raw data for {serial_number} on {target_day}")
             raw_data = self._fetch_daily_data_with_retries(
                 api_client=api_client,

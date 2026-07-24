@@ -157,6 +157,58 @@ class WatchPowerLatestDataTests(unittest.TestCase):
         finally:
             os.unlink(config_path)
 
+    def test_get_latest_data_falls_back_to_yesterday_when_today_empty(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as config_file:
+            json.dump(
+                [
+                    {
+                        "serial_number": "INV-001",
+                        "wifi_pn": "wifi",
+                        "device_code": 1,
+                        "device_address": 1,
+                        "system_type": "offgrid",
+                        "alias": "Alpha",
+                        "username": "user",
+                        "password": "pass",
+                    }
+                ],
+                config_file,
+            )
+            config_path = config_file.name
+
+        try:
+            service = WatchPowerService(
+                config_path=config_path, timezone_name="Europe/Nicosia"
+            )
+            calls = []
+            service._watchpower_today = lambda: datetime(2026, 3, 20).date()
+            service._get_api_for_inverter = lambda inverter_config: object()
+
+            def fetch_daily(**kwargs):
+                calls.append(kwargs["target_day"].isoformat())
+                if kwargs["target_day"].isoformat() == "2026-03-20":
+                    return {"dat": {"title": [{"title": "Data E Hora"}], "row": []}}
+                return {
+                    "dat": {
+                        "title": [
+                            {"title": "Data E Hora"},
+                            {"title": "AC Output Active Power"},
+                        ],
+                        "row": [{"field": ["2026-03-19 23:58:00", "90"]}],
+                    }
+                }
+
+            service._fetch_daily_data_with_retries = fetch_daily
+
+            result = service.get_latest_data("INV-001")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(calls, ["2026-03-20", "2026-03-19"])
+            self.assertEqual(result["data"]["Data E Hora"], "2026-03-19 23:58:00")
+            self.assertEqual(result["data"]["AC Output Active Power"], "90")
+        finally:
+            os.unlink(config_path)
+
     def test_get_daily_raw_sorts_rows_by_timestamp(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as config_file:
             json.dump(
