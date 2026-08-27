@@ -129,6 +129,17 @@ class AppReadPathTests(unittest.TestCase):
         flask_app_module.watchpower_service = self.original_watchpower_service
         flask_app_module.INVERTER_STALE_THRESHOLD_MINUTES = self.original_threshold
 
+    def test_find_user_group_accepts_display_name(self):
+        flask_app_module.watchpower_service = StubWatchPowerService("INV-001")
+        flask_app_module.watchpower_service.inverters[0].update(
+            {"username": "gonul2026", "description": "Gonul"}
+        )
+
+        group = flask_app_module._find_user_group_by_key("gonul")
+
+        self.assertIsNotNone(group)
+        self.assertEqual(group["groupKey"], "gonul2026")
+
     def test_get_inverter_prefers_cache_for_warm_reads(self):
         serial_number = "INV-001"
         cache_entry = {

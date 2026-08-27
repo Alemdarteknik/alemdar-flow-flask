@@ -537,7 +537,16 @@ def _group_inverters_by_user(inverters):
 def _find_user_group_by_key(user_key):
     inverters = watchpower_service.inverters if watchpower_service else []
     groups = _group_inverters_by_user(inverters)
-    return next((group for group in groups if group["groupKey"] == user_key), None)
+    normalized_key = _normalize_group_token(user_key)
+    return next(
+        (
+            group
+            for group in groups
+            if group["groupKey"] == normalized_key
+            or _normalize_group_token(group["displayName"]) == normalized_key
+        ),
+        None,
+    )
 
 
 def _build_status_payload(serial_number, response_payload):
